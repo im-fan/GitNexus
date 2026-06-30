@@ -42,6 +42,12 @@ import { getGlobalDir } from '../../src/storage/repo-manager.js';
 // load, the same point CLONE_ROOT is frozen, so the two always agree.
 const EXPECTED_CLONE_ROOT = path.resolve(path.join(getGlobalDir(), 'repos'));
 
+async function mkControlledRoot(prefix: string): Promise<string> {
+  const base = path.join(process.cwd(), '.tmp-test');
+  await fs.mkdir(base, { recursive: true });
+  return fs.realpath(await fs.mkdtemp(path.join(base, prefix)));
+}
+
 describe('git-clone', () => {
   describe('extractRepoName', () => {
     it('extracts name from HTTPS URL', () => {
@@ -95,29 +101,39 @@ describe('git-clone', () => {
       expect(elapsedMs).toBeLessThan(500);
     });
 
-    it('strips leading dashes to prevent argument injection', () => {
-      expect(extractRepoName('https://github.com/user/--upload-pack=payload.git')).toBe(
-        'upload-pack_payload',
+    it('rejects leading dashes to prevent argument injection', () => {
+      expect(() => extractRepoName('https://github.com/user/--upload-pack=payload.git')).toThrow(
+        'valid repository name',
       );
-      expect(extractRepoName('https://github.com/user/-repo')).toBe('repo');
+      expect(() => extractRepoName('https://github.com/user/-repo')).toThrow(
+        'valid repository name',
+      );
     });
 
-    it('sanitizes unsafe directory characters', () => {
-      // sanitizeRepoName turns <tag> into _tag_
-      expect(extractRepoName('https://github.com/user/repo<tag>.git')).toBe('repo_tag_');
+    it('rejects unsafe directory characters instead of sanitizing them', () => {
+      expect(() => extractRepoName('https://github.com/user/repo<tag>.git')).toThrow(
+        'valid repository name',
+      );
     });
 
-    it('sanitizes shell metacharacters in URL segments', () => {
+    it('rejects shell metacharacters in URL segments', () => {
       // The split on /[/:]/ does not split on backslashes or other shell chars,
-      // so a name like `repo;rm -rf /` would slip through without the pattern.
-      // After fix/sanitize-repo-name, these are sanitized to underscores.
-      expect(extractRepoName('https://example.com/foo:repo;rm')).toBe('repo_rm');
-      expect(extractRepoName('https://example.com/foo:repo$x')).toBe('repo_x');
+      // so a name like `repo;rm -rf /` must fail instead of being rewritten.
+      expect(() => extractRepoName('https://example.com/foo:repo;rm')).toThrow(
+        'valid repository name',
+      );
+      expect(() => extractRepoName('https://example.com/foo:repo$x')).toThrow(
+        'valid repository name',
+      );
     });
 
-    it('sanitizes whitespace and backslashes', () => {
-      expect(extractRepoName('https://example.com/foo:repo name')).toBe('repo_name');
-      expect(extractRepoName('https://example.com/foo:repo\\name')).toBe('repo_name');
+    it('rejects whitespace and backslashes', () => {
+      expect(() => extractRepoName('https://example.com/foo:repo name')).toThrow(
+        'valid repository name',
+      );
+      expect(() => extractRepoName('https://example.com/foo:repo\\name')).toThrow(
+        'valid repository name',
+      );
     });
   });
 
@@ -533,6 +549,154 @@ describe('git-clone', () => {
       await expect(cloneOrPull('file:///etc/passwd', fakeTarget)).rejects.toThrow(
         'Only https:// and http://',
       );
+    });
+
+    it('allows an explicitly controlled auto-sync clone root outside the default root', async () => {
+      const root = await mkControlledRoot('gitnexus-controlled-root-');
+      try {
+        const target = path.join(root, 'repo');
+        await expect(
+          cloneOrPull('http://127.0.0.1/repo.git', target, undefined, {
+            allowedCloneRoot: root,
+            expectedRepoName: 'repo',
+          }),
+        ).rejects.toThrow('private/internal');
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects controlled-root target names that do not match the remote repo name', async () => {
+      const root = await mkControlledRoot('gitnexus-controlled-root-');
+      try {
+        await expect(
+          cloneOrPull('https://example.com/team/repo.git', path.join(root, 'other'), undefined, {
+            allowedCloneRoot: root,
+            expectedRepoName: 'repo',
+          }),
+        ).rejects.toThrow('basename must match');
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects symlink children before clone or pull', async () => {
+      const root = await mkControlledRoot('gitnexus-controlled-root-');
+      const outside = await mkControlledRoot('gitnexus-outside-');
+      try {
+        await fs.symlink(outside, path.join(root, 'repo'));
+        await expect(
+          cloneOrPull('https://example.com/team/repo.git', path.join(root, 'repo'), undefined, {
+            allowedCloneRoot: root,
+            expectedRepoName: 'repo',
+          }),
+        ).rejects.toThrow('symlink');
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects existing clones whose remote origin mismatches the requested URL', async () => {
+      const root = await mkControlledRoot('gitnexus-controlled-root-');
+      const target = path.join(root, 'repo');
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const proc = spawn('git', ['init'], { cwd: root, stdio: 'ignore' });
+          proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`git init ${code}`))));
+          proc.on('error', reject);
+        });
+        await fs.rename(path.join(root, '.git'), path.join(target, '.git')).catch(async () => {
+          await fs.mkdir(target);
+          await fs.rename(path.join(root, '.git'), path.join(target, '.git'));
+        });
+        await fs.writeFile(
+          path.join(target, '.git', 'config'),
+          [
+            '[remote "origin"]',
+            '\turl = https://example.com/other/repo.git',
+            '\tfetch = +refs/heads/*:refs/remotes/origin/*',
+            '',
+          ].join('\n'),
+        );
+
+        await expect(
+          cloneOrPull('https://example.com/team/repo.git', target, undefined, {
+            allowedCloneRoot: root,
+            expectedRepoName: 'repo',
+          }),
+        ).rejects.toThrow('not the requested URL');
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('quarantines partial auto-sync clone output on clone failure', async () => {
+      const root = await mkControlledRoot('gitnexus-controlled-root-');
+      const quarantineRoot = path.join(root, 'quarantine');
+      const target = path.join(root, 'repo');
+      try {
+        await expect(
+          cloneOrPull('https://example.com/team/repo.git', target, undefined, {
+            allowedCloneRoot: root,
+            expectedRepoName: 'repo',
+            quarantineRoot,
+            runGitForTest: async () => {
+              await fs.mkdir(target);
+              await fs.writeFile(path.join(target, 'partial.txt'), 'partial', 'utf-8');
+              throw new Error('git clone failed (exit code 128)');
+            },
+          }),
+        ).rejects.toThrow('git clone failed');
+
+        const entries = await fs.readdir(quarantineRoot);
+        expect(entries.some((entry) => entry.startsWith('auto-sync-') && entry.endsWith('-repo'))).toBe(
+          true,
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('does not quarantine an existing non-git directory on clone failure', async () => {
+      const root = await mkControlledRoot('gitnexus-controlled-root-');
+      const quarantineRoot = path.join(root, 'quarantine');
+      const target = path.join(root, 'repo');
+      try {
+        await fs.mkdir(target);
+        await fs.writeFile(path.join(target, 'user-file.txt'), 'keep me', 'utf-8');
+
+        await expect(
+          cloneOrPull('https://example.com/team/repo.git', target, undefined, {
+            allowedCloneRoot: root,
+            expectedRepoName: 'repo',
+            quarantineRoot,
+          }),
+        ).rejects.toThrow('already exists but is not a git repository');
+
+        await expect(fs.readFile(path.join(target, 'user-file.txt'), 'utf-8')).resolves.toBe(
+          'keep me',
+        );
+        await expect(fs.access(quarantineRoot)).rejects.toThrow();
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects controlled clone roots with unsafe permissions inside cloneOrPull', async () => {
+      const root = await mkControlledRoot('gitnexus-controlled-root-');
+      try {
+        await fs.chmod(root, 0o777);
+        await expect(
+          cloneOrPull('https://example.com/team/repo.git', path.join(root, 'repo'), undefined, {
+            allowedCloneRoot: root,
+            expectedRepoName: 'repo',
+          }),
+        ).rejects.toThrow('world-writable');
+      } finally {
+        await fs.chmod(root, 0o700).catch(() => {});
+        await fs.rm(root, { recursive: true, force: true });
+      }
     });
   });
 

@@ -15,6 +15,12 @@ const _require = createRequire(import.meta.url);
 const pkg = _require('../../package.json');
 const program = new Command();
 
+if (process.env.AUTO_UPDATE_AND_ANALYZE_FLAG?.trim() === '1') {
+  void import('../core/auto-sync/index.js').then(({ maybeStartAutoSyncFromEnv }) =>
+    maybeStartAutoSyncFromEnv(),
+  );
+}
+
 function collectCodingAgents(value: string, previous: string[] | undefined): string[] {
   return [...(previous ?? []), ...value.split(',')];
 }

@@ -1,0 +1,173 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { getGlobalDir } from '../../storage/repo-manager.js';
+
+const DANGEROUS_ROOTS = new Set(
+  [
+    '/',
+    os.homedir(),
+    os.tmpdir(),
+    '/bin',
+    '/boot',
+    '/dev',
+    '/etc',
+    '/lib',
+    '/lib64',
+    '/opt',
+    '/proc',
+    '/private/tmp',
+    '/private/var',
+    '/root',
+    '/sbin',
+    '/sys',
+    '/tmp',
+    '/usr',
+    '/var',
+  ].map((entry) => path.resolve(entry)),
+);
+
+const DANGEROUS_PARENT_ROOTS = new Set(
+  [
+    os.tmpdir(),
+    '/bin',
+    '/boot',
+    '/dev',
+    '/etc',
+    '/lib',
+    '/lib64',
+    '/opt',
+    '/proc',
+    '/private/tmp',
+    '/private/var',
+    '/root',
+    '/sbin',
+    '/sys',
+    '/tmp',
+    '/usr',
+    '/var',
+  ].map((entry) => path.resolve(entry)),
+);
+
+const QUARANTINE_RETENTION_DAYS = 14;
+
+export interface AutoSyncCloneRoot {
+  root: string;
+  quarantineRoot: string;
+  quarantineRetentionDays: number;
+}
+
+export async function resolveConfiguredCloneRoot(localPath: string): Promise<AutoSyncCloneRoot> {
+  const root = normalizeConfiguredCloneRoot(localPath);
+  assertNotDangerousRoot(root);
+  await assertNoSymlinkPath(root);
+  await assertDirectoryOwnerAndPermissions(root);
+  const realRoot = await fs.realpath(root);
+  assertContainedOrSame(root, realRoot, 'Configured clone root realpath escaped its normalized path');
+  assertNotDangerousRoot(realRoot);
+  assertNotGitNexusInternalRoot(realRoot);
+
+  return {
+    root: realRoot,
+    quarantineRoot: path.join(getGlobalDir(), 'quarantine'),
+    quarantineRetentionDays: QUARANTINE_RETENTION_DAYS,
+  };
+}
+
+export function normalizeConfiguredCloneRoot(localPath: string): string {
+  const value = localPath.trim();
+  if (!value) throw new Error('local_path is required');
+  if (!path.isAbsolute(value)) throw new Error('local_path must be an absolute path');
+  if (value.split(path.sep).includes('..')) {
+    throw new Error('local_path must be normalized and must not contain traversal segments');
+  }
+  const resolved = path.resolve(value);
+  if (resolved !== path.normalize(value)) {
+    throw new Error('local_path must be normalized and must not contain traversal segments');
+  }
+  return resolved;
+}
+
+export async function quarantineAutoSyncPartial(targetDir: string, quarantineRoot: string): Promise<string> {
+  await fs.mkdir(quarantineRoot, { recursive: true, mode: 0o700 });
+  const base = path.basename(targetDir);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const destination = path.join(quarantineRoot, `auto-sync-${stamp}-${process.pid}-${base}`);
+  await fs.rename(targetDir, destination);
+  await fs.writeFile(
+    `${destination}.README.txt`,
+    [
+      'GitNexus auto-sync isolated a partial or unsafe clone result.',
+      `Created at: ${new Date().toISOString()}`,
+      `Original path: ${targetDir}`,
+      `Retention: keep for ${QUARANTINE_RETENTION_DAYS} days unless an operator reviews and removes it earlier.`,
+      'Cleanup: verify the original path and remote before manual deletion.',
+      '',
+    ].join('\n'),
+    'utf-8',
+  );
+  return destination;
+}
+
+function assertNotDangerousRoot(root: string): void {
+  if (DANGEROUS_ROOTS.has(root)) throw new Error(`Refusing unsafe auto-sync clone root: ${root}`);
+  for (const dangerousRoot of DANGEROUS_PARENT_ROOTS) {
+    const rel = path.relative(dangerousRoot, root);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+      throw new Error(`Refusing unsafe auto-sync clone root under ${dangerousRoot}: ${root}`);
+    }
+  }
+  if (path.parse(root).root === root) throw new Error(`Refusing filesystem root as clone root: ${root}`);
+}
+
+function assertNotGitNexusInternalRoot(root: string): void {
+  const gitnexusDir = path.resolve(getGlobalDir());
+  const blocked = [
+    gitnexusDir,
+    path.join(gitnexusDir, 'groups'),
+    path.join(gitnexusDir, 'indexes'),
+    path.join(gitnexusDir, 'quarantine'),
+  ];
+  for (const blockedRoot of blocked) {
+    const rel = path.relative(blockedRoot, root);
+    if (!rel || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+      throw new Error(`Refusing GitNexus internal directory as auto-sync clone root: ${root}`);
+    }
+  }
+}
+
+async function assertNoSymlinkPath(root: string): Promise<void> {
+  const parsed = path.parse(root);
+  let current = parsed.root;
+  const parts = root.slice(parsed.root.length).split(path.sep).filter(Boolean);
+  for (const part of parts) {
+    current = path.join(current, part);
+    let stat;
+    try {
+      stat = await fs.lstat(current);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') break;
+      throw err;
+    }
+    if (stat.isSymbolicLink()) throw new Error(`Refusing symlink in auto-sync clone root path: ${current}`);
+  }
+}
+
+export async function assertDirectoryOwnerAndPermissions(root: string): Promise<void> {
+  const stat = await fs.stat(root);
+  if (!stat.isDirectory()) throw new Error(`auto-sync clone root is not a directory: ${root}`);
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+    throw new Error(`auto-sync clone root is owned by uid ${stat.uid}, not current process uid`);
+  }
+  const mode = stat.mode & 0o777;
+  const worldWritable = (mode & 0o002) !== 0;
+  const sticky = (stat.mode & 0o1000) !== 0;
+  if (worldWritable && !sticky) {
+    throw new Error(`Refusing world-writable auto-sync clone root without sticky bit: ${root}`);
+  }
+}
+
+function assertContainedOrSame(root: string, child: string, message: string): void {
+  const rel = path.relative(root, child);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(message);
+}

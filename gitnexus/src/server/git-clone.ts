@@ -10,8 +10,11 @@ import path from 'path';
 import fs from 'fs/promises';
 import { isIP } from 'net';
 import { logger } from '../core/logger.js';
-import { parseRepoNameFromUrl } from '../storage/git.js';
 import { getGlobalDir } from '../storage/repo-manager.js';
+import {
+  assertDirectoryOwnerAndPermissions,
+  quarantineAutoSyncPartial,
+} from '../core/auto-sync/path-security.js';
 
 /**
  * Root directory for all cloned repositories. Targets must resolve inside this.
@@ -39,12 +42,16 @@ export const REPO_NAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
  * clone root via path traversal.
  */
 export function extractRepoName(url: string): string {
-  const name = parseRepoNameFromUrl(url);
+  let trimmed = url.trim();
+  while (trimmed.endsWith('/')) trimmed = trimmed.slice(0, -1);
+  const withoutGit = trimmed.toLowerCase().endsWith('.git') ? trimmed.slice(0, -4) : trimmed;
+  const name = withoutGit.split(/[/:]/).filter(Boolean).pop() ?? '';
   if (
     !name ||
     name === '.' ||
     name === '..' ||
     name === 'unknown' ||
+    name.startsWith('-') ||
     !REPO_NAME_PATTERN.test(name)
   ) {
     throw new Error('Could not extract a valid repository name from URL');
@@ -233,6 +240,14 @@ function assertNotPrivateIPv4(ip: string): void {
 export interface CloneProgress {
   phase: 'cloning' | 'pulling';
   message: string;
+}
+
+export interface CloneOrPullOptions {
+  token?: string;
+  allowedCloneRoot?: string;
+  expectedRepoName?: string;
+  quarantineRoot?: string;
+  runGitForTest?: typeof runGit;
 }
 
 /**
@@ -443,36 +458,54 @@ export async function cloneOrPull(
   url: string,
   targetDir: string,
   onProgress?: (progress: CloneProgress) => void,
-  options?: { token?: string },
+  options?: CloneOrPullOptions,
 ): Promise<string> {
   // Containment barrier — inline with the canonical path.relative idiom so
   // CodeQL recognizes the sanitizer at every following filesystem and
   // subprocess sink. The same `safeTarget` is used for every downstream
   // path operation — no reassignment that the analyzer could lose track of.
   //
-  // Limitation: this is a lexical containment check, not a realpath check.
-  // If an attacker can place a symlink under CLONE_ROOT pointing outside it,
-  // the lexical check passes but the clone lands at the symlink target. That
-  // requires pre-existing local write access to CLONE_ROOT, so the threat
-  // model considers it out of scope; CodeQL js/path-injection accepts the
-  // lexical form. Tracked as a follow-up if defense-in-depth is needed.
+  // The lexical check runs before filesystem creation; realpath and symlink
+  // checks below run before pull/clone and again after clone completes.
+  const cloneRoot = path.resolve(options?.allowedCloneRoot ?? CLONE_ROOT);
+  const expectedRepoName = options?.expectedRepoName;
+  if (expectedRepoName !== undefined && expectedRepoName !== extractRepoName(url)) {
+    throw new Error(`Clone target repo name ${expectedRepoName} does not match requested URL`);
+  }
+
   const safeTarget = path.resolve(targetDir);
-  const rel = path.relative(CLONE_ROOT, safeTarget);
+  if (expectedRepoName !== undefined && path.basename(safeTarget) !== expectedRepoName) {
+    throw new Error(`Clone target basename must match repository name ${expectedRepoName}`);
+  }
+
+  const rel = path.relative(cloneRoot, safeTarget);
   if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new Error(`Clone target must be a subdirectory of ${CLONE_ROOT}`);
+    throw new Error(`Clone target must be a subdirectory of ${cloneRoot}`);
   }
 
   // Always validate the requested URL — the prior shape only ran this in
   // the code path where the repo was cloned. Now it runs unconditionally,
   // preventing SSRF / blocked-host bypasses even when targetDir already exists.
   validateGitUrl(url);
+  await fs.mkdir(cloneRoot, { recursive: true });
+  if (options?.allowedCloneRoot) {
+    await assertDirectoryOwnerAndPermissions(cloneRoot);
+  }
+  await assertNoSymlinkPath(cloneRoot, safeTarget);
+  await assertPreRealpathContainment(cloneRoot, safeTarget);
 
   const exists = await fs.access(path.join(safeTarget, '.git')).then(
     () => true,
     () => false,
   );
 
+  const targetExists = await fs.access(safeTarget).then(
+    () => true,
+    () => false,
+  );
+
   if (exists) {
+    await assertPostRealpathContainment(cloneRoot, safeTarget);
     // Confirm the existing clone is actually the same repository the caller
     // requested. Without this check, a pull would silently succeed against
     // whatever remote the dir was originally cloned from.
@@ -480,12 +513,70 @@ export async function cloneOrPull(
     onProgress?.({ phase: 'pulling', message: 'Pulling latest changes...' });
     await runGit(['pull', '--ff-only'], safeTarget, { token: options?.token, url });
   } else {
+    if (targetExists) {
+      throw new Error(`Clone target already exists but is not a git repository: ${safeTarget}`);
+    }
     await fs.mkdir(path.dirname(safeTarget), { recursive: true });
+    await assertNoSymlinkPath(cloneRoot, safeTarget);
+    await assertPreRealpathContainment(cloneRoot, safeTarget);
     onProgress?.({ phase: 'cloning', message: `Cloning ${url}...` });
-    await runGit(buildCloneArgs(url, safeTarget), undefined, { token: options?.token, url });
+    try {
+      const runGitImpl = options?.runGitForTest ?? runGit;
+      await runGitImpl(buildCloneArgs(url, safeTarget), undefined, { token: options?.token, url });
+      await assertPostRealpathContainment(cloneRoot, safeTarget);
+    } catch (err: unknown) {
+      if (options?.quarantineRoot) {
+        await fs
+          .access(safeTarget)
+          .then(async () => {
+            await quarantineAutoSyncPartial(safeTarget, options.quarantineRoot!);
+          })
+          .catch(() => {});
+      }
+      throw err;
+    }
   }
 
   return safeTarget;
+}
+
+async function assertPreRealpathContainment(root: string, target: string): Promise<void> {
+  const realRoot = await fs.realpath(root);
+  const realParent = await fs.realpath(path.dirname(target));
+  const parentRel = path.relative(realRoot, realParent);
+  if (parentRel.startsWith('..') || path.isAbsolute(parentRel)) {
+    throw new Error(`Clone target parent must resolve inside ${root}`);
+  }
+}
+
+async function assertPostRealpathContainment(root: string, target: string): Promise<void> {
+  const realRoot = await fs.realpath(root);
+  const realTarget = await fs.realpath(target);
+  const rel = path.relative(realRoot, realTarget);
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`Clone target must resolve inside ${root}`);
+  }
+}
+
+async function assertNoSymlinkPath(root: string, target: string): Promise<void> {
+  const resolvedRoot = path.resolve(root);
+  const resolvedTarget = path.resolve(target);
+  const relativeTarget = path.relative(resolvedRoot, resolvedTarget);
+  if (relativeTarget.startsWith('..') || path.isAbsolute(relativeTarget)) return;
+  let current = resolvedRoot;
+  for (const segment of relativeTarget.split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    let stat;
+    try {
+      stat = await fs.lstat(current);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') break;
+      throw err;
+    }
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Refusing symlink in clone target path: ${current}`);
+    }
+  }
 }
 
 /**
