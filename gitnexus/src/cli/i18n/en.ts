@@ -120,6 +120,8 @@ export const en = {
     'One-time setup: configure MCP for Cursor, Claude Code, OpenCode, Codex',
   'help.command.uninstall.description':
     'Reverse `setup`: remove GitNexus MCP entries, skills, and hooks from all detected editors',
+  'help.command.watch.description':
+    'Control scheduled repository clone/pull and analysis from GITNEXUS_HOME/watch_config.yml',
   'help.command.analyze.description': 'Index a repository (full analysis)',
   'help.command.index.description':
     'Register an existing .gitnexus/ folder into the global registry (no re-analysis needed)',

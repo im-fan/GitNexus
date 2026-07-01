@@ -15,12 +15,6 @@ const _require = createRequire(import.meta.url);
 const pkg = _require('../../package.json');
 const program = new Command();
 
-if (process.env.AUTO_UPDATE_AND_ANALYZE_FLAG?.trim() === '1') {
-  void import('../core/auto-sync/index.js').then(({ maybeStartAutoSyncFromEnv }) =>
-    maybeStartAutoSyncFromEnv(),
-  );
-}
-
 function collectCodingAgents(value: string, previous: string[] | undefined): string[] {
   return [...(previous ?? []), ...value.split(',')];
 }
@@ -46,6 +40,25 @@ program
   )
   .option('-f, --force', 'Apply the changes (default is a dry-run preview)')
   .action(createLazyAction(() => import('./uninstall.js'), 'uninstallCommand'));
+
+program
+  .command('watch [action]')
+  .description(
+    'Control scheduled repository clone/pull and analysis from GITNEXUS_HOME/watch_config.yml',
+  )
+  .addHelpText(
+    'after',
+    [
+      '',
+      'Actions: init, start (default), restart, stop, status',
+      'Configuration: GITNEXUS_HOME/watch_config.yml',
+      'Runtime files: GITNEXUS_HOME/watch/watch.pid, watch.lock, watch.status.json, auto-sync-state.json',
+      'Writes: GITNEXUS_HOME/watch/project_commit_info.txt',
+      'Remote URLs: only git@github.com:owner/repo.git, git@gitlab.com:group/repo.git, and git@gitee.com:owner/repo.git are allowed.',
+      'Runs once immediately, then repeats on sync_interval_minutes.',
+    ].join('\n'),
+  )
+  .action(createLazyAction(() => import('./watch.js'), 'watchCommand'));
 
 // Baseline of GITNEXUS_EMBEDDING_DIMS captured by the analyze preAction hook
 // before it overwrites the var, so the postAction hook can restore it. The

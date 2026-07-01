@@ -34,7 +34,7 @@ import { fileURLToPath } from 'url';
 import { JobManager } from './analyze-job.js';
 import { assertString, escapeRegExp, BadRequestError, createRouteLimiter } from './validation.js';
 import {
-  extractRepoName,
+  extractWebRepoName,
   getCloneDir,
   cloneOrPull,
   warnIfInsecureAzureConfig,
@@ -1582,7 +1582,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
           try {
             // Clone if URL provided
             if (repoUrl && !repoLocalPath) {
-              const repoName = extractRepoName(repoUrl);
+              const repoName = extractWebRepoName(repoUrl);
               targetPath = getCloneDir(repoName);
 
               jobManager.updateJob(job.id, {

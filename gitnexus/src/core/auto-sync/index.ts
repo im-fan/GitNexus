@@ -1,25 +1,29 @@
 export {
   AUTO_SYNC_CONFIG_FILE,
-  AUTO_SYNC_FLAG,
   getAutoSyncConfigPath,
   loadAutoSyncConfig,
   parseAutoSyncConfig,
-  parseAutoSyncFlag,
   parseBranchCandidates,
+  parseDurationMs,
+  validateAutoSyncBranchName,
+  validateAutoSyncRemoteUrl,
   type AutoSyncConfig,
   type AutoSyncConfigLoadResult,
-  type AutoSyncFlagDecision,
   type AutoSyncProjectConfig,
 } from './config.js';
 export {
   buildStateKey,
+  getAutoSyncWatchDir,
   getAutoSyncStatePath,
+  getProjectCommitInfoPath,
   loadAutoSyncState,
   saveAutoSyncState,
   shouldAnalyzeCommit,
+  writeProjectCommitInfo,
   type AutoSyncAnalyzeStatus,
   type AutoSyncCommitState,
   type AutoSyncCommitStateEntry,
+  type ProjectCommitInfoEntry,
 } from './state.js';
 export { extractRepoNameFromRemoteUrl } from './repo.js';
 export {
@@ -31,10 +35,19 @@ export {
 export {
   addRepoToGroup,
   getConfiguredRepoPath,
+  resolveActualConcurrency,
   runAutoSyncOnce,
   syncGroupByName,
   type AutoSyncLogger,
   type AutoSyncRunDeps,
   type AutoSyncRunResult,
 } from './runner.js';
-export { maybeStartAutoSyncFromEnv, type AutoSyncStartHandle } from './starter.js';
+export {
+  getAutoSyncWatchPaths,
+  readAutoSyncWatchStatus,
+  startAutoSyncWatch,
+  stopAutoSyncWatch,
+  type AutoSyncStartHandle,
+  type AutoSyncWatchPaths,
+  type WatchStatusRecord,
+} from './starter.js';

@@ -7,14 +7,18 @@ import { normalizeConfiguredCloneRoot } from './path-security.js';
 const _require = createRequire(import.meta.url);
 const yaml = _require('js-yaml') as typeof import('js-yaml');
 
-export const AUTO_SYNC_FLAG = 'AUTO_UPDATE_AND_ANALYZE_FLAG';
-export const AUTO_SYNC_CONFIG_FILE = 'sync_config.yml';
+export const AUTO_SYNC_CONFIG_FILE = 'watch_config.yml';
 const GROUP_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const MIN_SYNC_INTERVAL_MINUTES = 5;
+const DEFAULT_REPO_GIT_TIMEOUT_MS = 10_000;
+const DEFAULT_MAX_CONCURRENCY = 1;
+export const DEFAULT_ANALYZE_FAILURE_THRESHOLD = 3;
+const MIN_ANALYZE_FAILURE_THRESHOLD = 2;
+const ALLOWED_REMOTE_HOSTS = new Set(['github.com', 'gitlab.com', 'gitee.com']);
 
 export interface AutoSyncProjectConfig {
   localPath: string;
-  gitnexusGroup?: string;
+  groupName?: string;
   branches: string[];
   remoteUrls: string[];
 }
@@ -22,28 +26,15 @@ export interface AutoSyncProjectConfig {
 export interface AutoSyncConfig {
   configPath: string;
   syncIntervalMinutes: number;
+  repoGitTimeoutMs: number;
+  maxConcurrency: number;
+  analyzeFailureThreshold: number;
   projects: AutoSyncProjectConfig[];
 }
-
-export type AutoSyncFlagDecision =
-  | { enabled: true }
-  | { enabled: false; reason: 'unset' | 'disabled' | 'invalid'; message?: string };
 
 export type AutoSyncConfigLoadResult =
   | { ok: true; config: AutoSyncConfig }
   | { ok: false; reason: 'missing' | 'unreadable' | 'invalid'; message: string };
-
-export function parseAutoSyncFlag(raw = process.env[AUTO_SYNC_FLAG]): AutoSyncFlagDecision {
-  if (raw === undefined || raw.trim() === '') return { enabled: false, reason: 'unset' };
-  const trimmed = raw.trim();
-  if (trimmed === '0') return { enabled: false, reason: 'disabled' };
-  if (trimmed === '1') return { enabled: true };
-  return {
-    enabled: false,
-    reason: 'invalid',
-    message: `[auto-sync] ${AUTO_SYNC_FLAG} must be 0 or 1; got "${trimmed}". Auto sync is disabled.`,
-  };
-}
 
 export function getAutoSyncConfigPath(gitnexusDir = getGlobalDir()): string {
   return path.join(gitnexusDir, AUTO_SYNC_CONFIG_FILE);
@@ -92,7 +83,7 @@ export async function loadAutoSyncConfig(
     return {
       ok: false,
       reason: 'invalid',
-      message: `[auto-sync] Invalid sync_config.yml: ${(err as Error).message}. Auto sync is skipped.`,
+      message: `[auto-sync] Invalid watch_config.yml: ${(err as Error).message}. Auto sync is skipped.`,
     };
   }
 }
@@ -109,6 +100,31 @@ export function parseAutoSyncConfig(content: string, configPath: string): AutoSy
     errors.push('sync_interval_minutes must be a positive integer');
   } else if (interval < MIN_SYNC_INTERVAL_MINUTES) {
     errors.push(`sync_interval_minutes must be at least ${MIN_SYNC_INTERVAL_MINUTES}`);
+  }
+
+  const maxConcurrency =
+    raw.max_concurrency === undefined ? DEFAULT_MAX_CONCURRENCY : Number(raw.max_concurrency);
+  if (!Number.isInteger(maxConcurrency) || maxConcurrency <= 0) {
+    errors.push('max_concurrency must be a positive integer');
+  }
+
+  const repoGitTimeoutMs =
+    raw.repo_git_timeout === undefined
+      ? DEFAULT_REPO_GIT_TIMEOUT_MS
+      : parseDurationMs(raw.repo_git_timeout);
+  if (!Number.isInteger(repoGitTimeoutMs) || repoGitTimeoutMs <= 0) {
+    errors.push('repo_git_timeout must be a positive duration such as 10s');
+  }
+
+  const analyzeFailureThreshold =
+    raw.analyze_failure_threshold === undefined
+      ? DEFAULT_ANALYZE_FAILURE_THRESHOLD
+      : Number(raw.analyze_failure_threshold);
+  if (
+    !Number.isInteger(analyzeFailureThreshold) ||
+    analyzeFailureThreshold < MIN_ANALYZE_FAILURE_THRESHOLD
+  ) {
+    errors.push(`analyze_failure_threshold must be an integer >= ${MIN_ANALYZE_FAILURE_THRESHOLD}`);
   }
 
   const rawProjects = raw.projects;
@@ -142,22 +158,86 @@ export function parseAutoSyncConfig(content: string, configPath: string): AutoSy
       if (remoteUrls.length === 0) {
         errors.push(`projects[${index}].remote_urls must contain at least one URL`);
       }
+      for (let urlIndex = 0; urlIndex < remoteUrls.length; urlIndex += 1) {
+        try {
+          validateAutoSyncRemoteUrl(remoteUrls[urlIndex]);
+        } catch (err: unknown) {
+          errors.push(`projects[${index}].remote_urls[${urlIndex}] ${(err as Error).message}`);
+        }
+      }
 
-      const branches = parseBranchCandidates(project.branch);
-      if (branches.length === 0) errors.push(`projects[${index}].branch is required`);
+      if (project.branch !== undefined && project.branches !== undefined) {
+        errors.push(`projects[${index}] must not set both branch and branches`);
+      }
+      const branches = parseBranchCandidates(
+        project.branches !== undefined ? project.branches : project.branch,
+      );
+      if (branches.length === 0) errors.push(`projects[${index}].branches is required`);
+      for (let branchIndex = 0; branchIndex < branches.length; branchIndex += 1) {
+        try {
+          validateAutoSyncBranchName(branches[branchIndex]);
+        } catch (err: unknown) {
+          errors.push(`projects[${index}].branches[${branchIndex}] ${(err as Error).message}`);
+        }
+      }
 
-      const gitnexusGroup =
-        typeof project.gitnexus_group === 'string' ? project.gitnexus_group.trim() : undefined;
-      if (gitnexusGroup && !GROUP_NAME_PATTERN.test(gitnexusGroup)) {
-        errors.push(`projects[${index}].gitnexus_group is invalid`);
+      const groupName =
+        typeof project.group_name === 'string' && project.group_name.trim()
+          ? project.group_name.trim()
+          : undefined;
+      if (groupName && !GROUP_NAME_PATTERN.test(groupName)) {
+        errors.push(`projects[${index}].group_name is invalid`);
       }
 
       if (localPath && remoteUrls.length > 0 && branches.length > 0) {
-        projects.push({ localPath, gitnexusGroup, branches, remoteUrls });
+        projects.push({ localPath, groupName, branches, remoteUrls });
       }
     });
   }
 
   if (errors.length > 0) throw new Error(errors.join('; '));
-  return { configPath, syncIntervalMinutes: interval, projects };
+  return {
+    configPath,
+    syncIntervalMinutes: interval,
+    repoGitTimeoutMs,
+    maxConcurrency,
+    analyzeFailureThreshold,
+    projects,
+  };
+}
+
+export function validateAutoSyncRemoteUrl(remoteUrl: string): void {
+  const match = /^git@([^:\s/]+):([^\s]+)$/.exec(remoteUrl.trim());
+  if (!match) {
+    throw new Error('must use git@github.com:owner/repo.git, git@gitlab.com:group/repo.git, or git@gitee.com:owner/repo.git');
+  }
+  const host = match[1].toLowerCase();
+  const repoPath = match[2];
+  if (!ALLOWED_REMOTE_HOSTS.has(host)) {
+    throw new Error('host must be one of github.com, gitlab.com, or gitee.com');
+  }
+  if (repoPath.startsWith('/') || repoPath.includes('..') || repoPath.split('/').length < 2) {
+    throw new Error('path must include owner/repo without traversal');
+  }
+}
+
+export function validateAutoSyncBranchName(branch: string): void {
+  if (!branch.trim()) throw new Error('must not be empty');
+  if (/[\s\0-\x1f\x7f]/.test(branch)) throw new Error('must not contain whitespace or control characters');
+  if (/[~^:?*[\\]/.test(branch)) throw new Error('contains characters not allowed in a git ref');
+  if (branch.startsWith('-')) throw new Error('must not start with "-"');
+  if (branch.includes('..')) throw new Error('must not contain ".."');
+  if (branch.includes('`')) throw new Error('must not contain backticks');
+}
+
+export function parseDurationMs(value: unknown): number {
+  if (typeof value === 'number') return value * 1_000;
+  const raw = String(value ?? '').trim();
+  const match = /^(\d+)(ms|s|m)?$/.exec(raw);
+  if (!match) return Number.NaN;
+  const amount = Number(match[1]);
+  const unit = match[2] ?? 's';
+  if (unit === 'ms') return amount;
+  if (unit === 's') return amount * 1_000;
+  return amount * 60_000;
 }

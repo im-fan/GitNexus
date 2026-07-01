@@ -11,10 +11,12 @@ import fs from 'fs/promises';
 import { isIP } from 'net';
 import { logger } from '../core/logger.js';
 import { getGlobalDir } from '../storage/repo-manager.js';
+import { sanitizeRepoName } from '../storage/git.js';
 import {
   assertDirectoryOwnerAndPermissions,
   quarantineAutoSyncPartial,
 } from '../core/auto-sync/path-security.js';
+import { validateAutoSyncRemoteUrl } from '../core/auto-sync/config.js';
 
 /**
  * Root directory for all cloned repositories. Targets must resolve inside this.
@@ -57,6 +59,26 @@ export function extractRepoName(url: string): string {
     throw new Error('Could not extract a valid repository name from URL');
   }
   return name;
+}
+
+/**
+ * Derive a clone directory name for the web `/api/analyze` boundary.
+ *
+ * The API historically accepted Azure DevOps and similar URLs whose repo
+ * segment contains spaces or other directory-unsafe characters by sanitizing
+ * the final segment. Keep that compatibility at the web boundary while leaving
+ * `extractRepoName()` strict for internal/security-sensitive callers.
+ */
+export function extractWebRepoName(url: string): string {
+  let trimmed = url.trim();
+  while (trimmed.endsWith('/')) trimmed = trimmed.slice(0, -1);
+  const withoutGit = trimmed.toLowerCase().endsWith('.git') ? trimmed.slice(0, -4) : trimmed;
+  const rawName = withoutGit.split(/[/:]/).filter(Boolean).pop() ?? '';
+  const safeName = sanitizeRepoName(rawName);
+  if (!rawName || safeName === 'unknown') {
+    throw new Error('Could not extract a valid repository name from URL');
+  }
+  return safeName;
 }
 
 /** Get the clone target directory for a repo name. */
@@ -247,8 +269,19 @@ export interface CloneOrPullOptions {
   allowedCloneRoot?: string;
   expectedRepoName?: string;
   quarantineRoot?: string;
+  allowAutoSyncSsh?: boolean;
+  timeoutMs?: number;
+  branch?: string;
   runGitForTest?: typeof runGit;
 }
+
+type RunGitOptions = {
+  token?: string;
+  url?: string;
+  timeoutMs?: number;
+  timeoutKillGraceMs?: number;
+  spawnForTest?: typeof spawn;
+};
 
 /**
  * Build the `git clone` argument list for a given URL and target directory.
@@ -317,6 +350,10 @@ export function warnIfInsecureAzureConfig(): void {
 
 export function buildCloneArgs(url: string, targetDir: string): string[] {
   return ['clone', '--depth', '1', '--', url, targetDir];
+}
+
+export function buildBranchCloneArgs(url: string, targetDir: string, branch: string): string[] {
+  return ['clone', '--depth', '1', '--branch', branch, '--', url, targetDir];
 }
 
 /**
@@ -486,7 +523,8 @@ export async function cloneOrPull(
   // Always validate the requested URL — the prior shape only ran this in
   // the code path where the repo was cloned. Now it runs unconditionally,
   // preventing SSRF / blocked-host bypasses even when targetDir already exists.
-  validateGitUrl(url);
+  if (options?.allowAutoSyncSsh) validateAutoSyncRemoteUrl(url);
+  else validateGitUrl(url);
   await fs.mkdir(cloneRoot, { recursive: true });
   if (options?.allowedCloneRoot) {
     await assertDirectoryOwnerAndPermissions(cloneRoot);
@@ -511,7 +549,24 @@ export async function cloneOrPull(
     // whatever remote the dir was originally cloned from.
     await assertRemoteMatchesRequestedUrl(safeTarget, url);
     onProgress?.({ phase: 'pulling', message: 'Pulling latest changes...' });
-    await runGit(['pull', '--ff-only'], safeTarget, { token: options?.token, url });
+    const runGitImpl = options?.runGitForTest ?? runGit;
+    if (options?.branch) {
+      await runGitImpl(['fetch', '--depth', '1', 'origin', options.branch], safeTarget, {
+        token: options?.token,
+        url,
+        timeoutMs: options?.timeoutMs,
+      });
+      await runGitImpl(['checkout', options.branch], safeTarget, {
+        token: options?.token,
+        url,
+        timeoutMs: options?.timeoutMs,
+      });
+    }
+    await runGitImpl(['pull', '--ff-only'], safeTarget, {
+      token: options?.token,
+      url,
+      timeoutMs: options?.timeoutMs,
+    });
   } else {
     if (targetExists) {
       throw new Error(`Clone target already exists but is not a git repository: ${safeTarget}`);
@@ -522,7 +577,14 @@ export async function cloneOrPull(
     onProgress?.({ phase: 'cloning', message: `Cloning ${url}...` });
     try {
       const runGitImpl = options?.runGitForTest ?? runGit;
-      await runGitImpl(buildCloneArgs(url, safeTarget), undefined, { token: options?.token, url });
+      const cloneArgs = options?.branch
+        ? buildBranchCloneArgs(url, safeTarget, options.branch)
+        : buildCloneArgs(url, safeTarget);
+      await runGitImpl(cloneArgs, undefined, {
+        token: options?.token,
+        url,
+        timeoutMs: options?.timeoutMs,
+      });
       await assertPostRealpathContainment(cloneRoot, safeTarget);
     } catch (err: unknown) {
       if (options?.quarantineRoot) {
@@ -731,10 +793,11 @@ export function buildGitEnv(
 function runGit(
   args: string[],
   cwd?: string,
-  options?: { token?: string; url?: string },
+  options?: RunGitOptions,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('git', args, {
+    const spawnGit = options?.spawnForTest ?? spawn;
+    const proc = spawnGit('git', args, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -742,21 +805,47 @@ function runGit(
     });
 
     let stderr = '';
+    let settled = false;
+    let timedOut = false;
+    let killTimer: NodeJS.Timeout | undefined;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      fn();
+    };
+    const timer =
+      options?.timeoutMs && options.timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            proc.kill('SIGTERM');
+            killTimer = setTimeout(() => {
+              proc.kill('SIGKILL');
+            }, options.timeoutKillGraceMs ?? 1_000);
+          }, options.timeoutMs)
+        : undefined;
     proc.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk;
     });
 
     proc.on('close', (code) => {
-      if (code === 0) resolve();
+      if (timedOut) {
+        finish(() => reject(new Error(`git ${args[0]} timed out after ${options?.timeoutMs}ms`)));
+        return;
+      }
+      if (code === 0) finish(resolve);
       else {
         // Log full stderr internally but don't expose it to API callers (SSRF mitigation)
         if (stderr.trim()) logger.error(`git ${args[0]} stderr: ${stderr.trim()}`);
-        reject(new Error(`git ${args[0]} failed (exit code ${code})`));
+        finish(() => reject(new Error(`git ${args[0]} failed (exit code ${code})`)));
       }
     });
 
     proc.on('error', (err) => {
-      reject(new Error(`Failed to spawn git: ${err.message}`));
+      finish(() => reject(new Error(`Failed to spawn git: ${err.message}`)));
     });
   });
 }
+
+export const runGitForTest = runGit;

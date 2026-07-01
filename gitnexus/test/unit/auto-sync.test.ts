@@ -5,20 +5,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   extractRepoNameFromRemoteUrl,
+  getAutoSyncStatePath,
+  getAutoSyncWatchDir,
+  getProjectCommitInfoPath,
   loadAutoSyncConfig,
-  parseAutoSyncFlag,
   parseBranchCandidates,
+  parseDurationMs,
   resolveConfiguredCloneRoot,
   loadAutoSyncState,
   saveAutoSyncState,
   shouldAnalyzeCommit,
+  validateAutoSyncRemoteUrl,
+  validateAutoSyncBranchName,
+  writeProjectCommitInfo,
 } from '../../src/core/auto-sync/index.js';
 
 describe('auto-sync', () => {
   let tempDir: string;
   let gitnexusHome: string;
   let oldHome: string | undefined;
-  let oldFlag: string | undefined;
 
   beforeEach(async () => {
     const base = path.join(process.cwd(), '.tmp-test');
@@ -27,43 +32,38 @@ describe('auto-sync', () => {
     gitnexusHome = path.join(tempDir, '.gitnexus');
     await fs.mkdir(gitnexusHome);
     oldHome = process.env.GITNEXUS_HOME;
-    oldFlag = process.env.AUTO_UPDATE_AND_ANALYZE_FLAG;
     process.env.GITNEXUS_HOME = gitnexusHome;
-    delete process.env.AUTO_UPDATE_AND_ANALYZE_FLAG;
   });
 
   afterEach(async () => {
     if (oldHome === undefined) delete process.env.GITNEXUS_HOME;
     else process.env.GITNEXUS_HOME = oldHome;
-    if (oldFlag === undefined) delete process.env.AUTO_UPDATE_AND_ANALYZE_FLAG;
-    else process.env.AUTO_UPDATE_AND_ANALYZE_FLAG = oldFlag;
     await fs.rm(tempDir, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
 
-  it('keeps auto sync disabled when the flag is unset or 0', () => {
-    expect(parseAutoSyncFlag(undefined)).toEqual({ enabled: false, reason: 'unset' });
-    expect(parseAutoSyncFlag('0')).toEqual({ enabled: false, reason: 'disabled' });
+  it('places watch runtime artifacts under the watch directory by default', () => {
+    expect(getAutoSyncWatchDir(gitnexusHome)).toBe(path.join(gitnexusHome, 'watch'));
+    expect(getAutoSyncStatePath(gitnexusHome)).toBe(
+      path.join(gitnexusHome, 'watch', 'auto-sync-state.json'),
+    );
+    expect(getProjectCommitInfoPath(gitnexusHome)).toBe(
+      path.join(gitnexusHome, 'watch', 'project_commit_info.txt'),
+    );
   });
 
-  it('enables auto sync only for the explicit value 1', () => {
-    expect(parseAutoSyncFlag('1')).toEqual({ enabled: true });
-    expect(parseAutoSyncFlag('true')).toEqual({
-      enabled: false,
-      reason: 'invalid',
-      message: '[auto-sync] AUTO_UPDATE_AND_ANALYZE_FLAG must be 0 or 1; got "true". Auto sync is disabled.',
-    });
-  });
-
-  it('loads sync_config.yml from GITNEXUS_HOME and normalizes branch candidates', async () => {
+  it('loads watch_config.yml from GITNEXUS_HOME and normalizes branch candidates', async () => {
     await fs.writeFile(
-      path.join(gitnexusHome, 'sync_config.yml'),
+      path.join(gitnexusHome, 'watch_config.yml'),
       [
         'sync_interval_minutes: 10',
+        'max_concurrency: 3',
+        'repo_git_timeout: 12s',
+        'analyze_failure_threshold: 2',
         'projects:',
         '  - local_path: /tmp/repos',
-        '    gitnexus_group: back_end',
-        '    branch: test, master, test',
+        '    group_name: back_end',
+        '    branches: [test, master, test]',
         '    remote_urls:',
         '      - git@gitee.com:qts_server/qts_account.git',
       ].join('\n'),
@@ -73,14 +73,62 @@ describe('auto-sync', () => {
 
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) throw new Error('expected config to load');
-    expect(loaded.config.configPath).toBe(path.join(gitnexusHome, 'sync_config.yml'));
+    expect(loaded.config.configPath).toBe(path.join(gitnexusHome, 'watch_config.yml'));
     expect(loaded.config.syncIntervalMinutes).toBe(10);
+    expect(loaded.config.maxConcurrency).toBe(3);
+    expect(loaded.config.repoGitTimeoutMs).toBe(12_000);
+    expect(loaded.config.analyzeFailureThreshold).toBe(2);
     expect(loaded.config.projects[0]).toMatchObject({
       localPath: '/tmp/repos',
-      gitnexusGroup: 'back_end',
+      groupName: 'back_end',
       branches: ['test', 'master'],
       remoteUrls: ['git@gitee.com:qts_server/qts_account.git'],
     });
+  });
+
+  it('defaults repo_git_timeout and max_concurrency and allows empty group_name', async () => {
+    await fs.writeFile(
+      path.join(gitnexusHome, 'watch_config.yml'),
+      [
+        'sync_interval_minutes: 10',
+        'projects:',
+        '  - local_path: /tmp/repos',
+        '    group_name: ""',
+        '    branch: master',
+        '    remote_urls:',
+        '      - git@github.com:owner/repo.git',
+      ].join('\n'),
+    );
+
+    const loaded = await loadAutoSyncConfig();
+
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) throw new Error('expected config');
+    expect(loaded.config.repoGitTimeoutMs).toBe(10_000);
+    expect(loaded.config.maxConcurrency).toBe(1);
+    expect(loaded.config.analyzeFailureThreshold).toBe(3);
+    expect(loaded.config.projects[0].groupName).toBeUndefined();
+  });
+
+  it('rejects invalid analyze_failure_threshold values', async () => {
+    await fs.writeFile(
+      path.join(gitnexusHome, 'watch_config.yml'),
+      [
+        'sync_interval_minutes: 10',
+        'analyze_failure_threshold: 1',
+        'projects:',
+        '  - local_path: /tmp/repos',
+        '    branch: master',
+        '    remote_urls:',
+        '      - git@github.com:owner/repo.git',
+      ].join('\n'),
+    );
+
+    const loaded = await loadAutoSyncConfig();
+
+    expect(loaded.ok).toBe(false);
+    if (loaded.ok) throw new Error('expected invalid config');
+    expect(loaded.message).toContain('analyze_failure_threshold must be an integer >= 2');
   });
 
   it('reports missing config without throwing', async () => {
@@ -89,33 +137,33 @@ describe('auto-sync', () => {
     expect(loaded).toEqual({
       ok: false,
       reason: 'missing',
-      message: `[auto-sync] Missing config file: ${path.join(gitnexusHome, 'sync_config.yml')}. Auto sync is skipped.`,
+      message: `[auto-sync] Missing config file: ${path.join(gitnexusHome, 'watch_config.yml')}. Auto sync is skipped.`,
     });
   });
 
   it('reports invalid config without throwing', async () => {
-    await fs.writeFile(path.join(gitnexusHome, 'sync_config.yml'), 'projects: []\n');
+    await fs.writeFile(path.join(gitnexusHome, 'watch_config.yml'), 'projects: []\n');
 
     const loaded = await loadAutoSyncConfig();
 
     expect(loaded.ok).toBe(false);
     if (loaded.ok) throw new Error('expected invalid config');
     expect(loaded.reason).toBe('invalid');
-    expect(loaded.message).toContain('[auto-sync] Invalid sync_config.yml:');
+    expect(loaded.message).toContain('[auto-sync] Invalid watch_config.yml:');
     expect(loaded.message).toContain('sync_interval_minutes must be a positive integer');
     expect(loaded.message).toContain('projects must contain at least one project');
   });
 
   it('rejects missing, relative, and traversal local_path values at config load', async () => {
     await fs.writeFile(
-      path.join(gitnexusHome, 'sync_config.yml'),
+      path.join(gitnexusHome, 'watch_config.yml'),
       [
         'sync_interval_minutes: 10',
         'projects:',
         '  - local_path: ../repos',
         '    branch: master',
         '    remote_urls:',
-        '      - https://example.com/team/repo.git',
+        '      - git@github.com:team/repo.git',
       ].join('\n'),
     );
 
@@ -147,6 +195,18 @@ describe('auto-sync', () => {
     }
   });
 
+  it('allows the default GitNexus repos directory as an auto-sync clone root', async () => {
+    const root = path.join(gitnexusHome, 'repos');
+    await fs.mkdir(root, { recursive: true });
+
+    await expect(resolveConfiguredCloneRoot(root)).resolves.toEqual(
+      expect.objectContaining({
+        root,
+        quarantineRoot: path.join(gitnexusHome, 'watch', 'quarantine'),
+      }),
+    );
+  });
+
   it('rejects symlinks in configured clone root paths', async () => {
     const realRoot = path.join(tempDir, 'real-root');
     const linkRoot = path.join(tempDir, 'link-root');
@@ -163,10 +223,22 @@ describe('auto-sync', () => {
     await expect(resolveConfiguredCloneRoot(root)).resolves.toEqual(
       expect.objectContaining({
         root,
-        quarantineRoot: path.join(gitnexusHome, 'quarantine'),
+        quarantineRoot: path.join(gitnexusHome, 'watch', 'quarantine'),
         quarantineRetentionDays: 14,
       }),
     );
+  });
+
+  it('creates missing configured clone roots before watch clone work', async () => {
+    const root = path.join(tempDir, 'missing-repos');
+
+    await expect(resolveConfiguredCloneRoot(root)).resolves.toEqual(
+      expect.objectContaining({
+        root,
+        quarantineRoot: path.join(gitnexusHome, 'watch', 'quarantine'),
+      }),
+    );
+    expect((await fs.stat(root)).isDirectory()).toBe(true);
   });
 
   it('parses branch strings and arrays with trimming and de-duplication', () => {
@@ -174,22 +246,65 @@ describe('auto-sync', () => {
     expect(parseBranchCandidates(['develop,master', 'develop'])).toEqual(['develop', 'master']);
   });
 
+  it('rejects unsafe auto-sync branch names', () => {
+    expect(() => validateAutoSyncBranchName('feature/good-branch')).not.toThrow();
+    expect(() => validateAutoSyncBranchName('-upload-pack=evil')).toThrow('must not start');
+    expect(() => validateAutoSyncBranchName('feature bad')).toThrow('whitespace');
+    expect(() => validateAutoSyncBranchName('feature..bad')).toThrow('must not contain ".."');
+    expect(() => validateAutoSyncBranchName('bad:ref')).toThrow('not allowed');
+  });
+
   it('extracts safe repository names from remote URLs', () => {
     expect(extractRepoNameFromRemoteUrl('git@gitee.com:qts_server/qts_account.git')).toBe(
       'qts_account',
     );
-    expect(extractRepoNameFromRemoteUrl('https://example.com/team/repo-name.git')).toBe(
-      'repo-name',
-    );
+    expect(extractRepoNameFromRemoteUrl('git@gitlab.com:team/subgroup/repo-name.git')).toBe('repo-name');
   });
 
   it('rejects unsafe repository names without sanitizing them', () => {
-    expect(() => extractRepoNameFromRemoteUrl('https://example.com/team/repo$name.git')).toThrow(
+    expect(() => extractRepoNameFromRemoteUrl('git@github.com:team/repo$name.git')).toThrow(
       'valid repository name',
     );
-    expect(() => extractRepoNameFromRemoteUrl('https://example.com/team/..')).toThrow(
-      'valid repository name',
+    expect(() => extractRepoNameFromRemoteUrl('git@github.com:team/..')).toThrow('traversal');
+  });
+
+  it('allows only github, gitlab, and gitee SSH SCP remote URLs', () => {
+    expect(() => validateAutoSyncRemoteUrl('git@github.com:im-fan/multica.git')).not.toThrow();
+    expect(() => validateAutoSyncRemoteUrl('git@gitlab.com:group/subgroup/repo.git')).not.toThrow();
+    expect(() => validateAutoSyncRemoteUrl('git@gitee.com:qts-ops/qts-code-engineering.git')).not.toThrow();
+    expect(() => validateAutoSyncRemoteUrl('https://github.com/owner/repo.git')).toThrow('must use');
+    expect(() => validateAutoSyncRemoteUrl('ssh://git@github.com/owner/repo.git')).toThrow('must use');
+    expect(() => validateAutoSyncRemoteUrl('user@github.com:owner/repo.git')).toThrow('must use');
+    expect(() => validateAutoSyncRemoteUrl('git@example.com:owner/repo.git')).toThrow('host must be');
+  });
+
+  it('parses repo git timeout durations', () => {
+    expect(parseDurationMs('10s')).toBe(10_000);
+    expect(parseDurationMs('2m')).toBe(120_000);
+    expect(parseDurationMs('5000ms')).toBe(5000);
+    expect(parseDurationMs('10')).toBe(10_000);
+    expect(parseDurationMs(10)).toBe(10_000);
+  });
+
+  it('keeps branch compatibility but rejects branch and branches together', async () => {
+    await fs.writeFile(
+      path.join(gitnexusHome, 'watch_config.yml'),
+      [
+        'sync_interval_minutes: 10',
+        'projects:',
+        '  - local_path: /tmp/repos',
+        '    branch: master',
+        '    branches: [develop]',
+        '    remote_urls:',
+        '      - git@github.com:owner/repo.git',
+      ].join('\n'),
     );
+
+    const loaded = await loadAutoSyncConfig();
+
+    expect(loaded.ok).toBe(false);
+    if (loaded.ok) throw new Error('expected invalid config');
+    expect(loaded.message).toContain('must not set both branch and branches');
   });
 
   it('uses commit ids to skip unchanged analyses and retry failed prior analyses', () => {
@@ -217,6 +332,8 @@ describe('auto-sync', () => {
           codeCommitId: 'abc',
           analyzedCommitId: 'abc',
           lastAnalyzeStatus: 'success',
+          analyzeConsecutiveFailures: 2,
+          lastAnalyzeError: 'old error',
           lastSyncTime: '2026-06-30T00:00:00.000Z',
         },
       },
@@ -228,11 +345,13 @@ describe('auto-sync', () => {
     );
     await expect(loadAutoSyncState(statePath)).resolves.toEqual({
       '/tmp/repos/qts_account|master': {
-        codeCommitId: 'abc',
-        analyzedCommitId: 'abc',
-        lastAnalyzeStatus: 'success',
-        lastSyncTime: '2026-06-30T00:00:00.000Z',
-      },
+          codeCommitId: 'abc',
+          analyzedCommitId: 'abc',
+          lastAnalyzeStatus: 'success',
+          analyzeConsecutiveFailures: 2,
+          lastAnalyzeError: 'old error',
+          lastSyncTime: '2026-06-30T00:00:00.000Z',
+        },
     });
   });
 
@@ -245,6 +364,50 @@ describe('auto-sync', () => {
 
     expect(stderr).toHaveBeenCalledWith(
       `[auto-sync] Ignoring unreadable or corrupt state file: ${statePath}. State will be rebuilt.\n`,
+    );
+  });
+
+  it('writes project_commit_info.txt atomically', async () => {
+    const infoPath = path.join(tempDir, 'project_commit_info.txt');
+
+    await writeProjectCommitInfo(
+      [
+        {
+          remoteUrl: 'git@github.com:owner/repo.git',
+          localPath: '/tmp/repos/repo',
+          branch: 'master',
+          codeCommitId: 'abc',
+          analyzedCommitId: 'abc',
+          status: 'success',
+          analyzeConsecutiveFailures: 0,
+          analyzeFailureThreshold: 3,
+          lastSyncTime: '2026-06-30T00:00:00.000Z',
+        },
+        {
+          remoteUrl: 'git@github.com:owner/bad.git',
+          localPath: '/tmp/repos/bad',
+          branch: 'master',
+          codeCommitId: 'def',
+          analyzedCommitId: 'abc',
+          status: 'threshold_skipped',
+          analyzeConsecutiveFailures: 3,
+          analyzeFailureThreshold: 3,
+          lastAnalyzeError: 'parser crashed',
+          lastSyncTime: '2026-06-30T00:00:00.000Z',
+        },
+      ],
+      infoPath,
+    );
+
+    const content = await fs.readFile(infoPath, 'utf-8');
+    expect(content).toContain('remote: git@github.com:owner/repo.git');
+    expect(content).toContain('code_commit: abc');
+    expect(content).toContain('analyze_consecutive_failures: 0');
+    expect(content).toContain('analyze_failure_threshold: 3');
+    expect(content).toContain('status: threshold_skipped');
+    expect(content).toContain('last_analyze_error: parser crashed');
+    await expect(fs.readdir(tempDir)).resolves.not.toContain(
+      expect.stringContaining('project_commit_info.txt.tmp'),
     );
   });
 });

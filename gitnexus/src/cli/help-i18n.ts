@@ -13,6 +13,7 @@ const COMMAND_DESCRIPTION_KEYS = {
   '': 'help.description.root',
   setup: 'help.command.setup.description',
   uninstall: 'help.command.uninstall.description',
+  watch: 'help.command.watch.description',
   analyze: 'help.command.analyze.description',
   index: 'help.command.index.description',
   serve: 'help.command.serve.description',

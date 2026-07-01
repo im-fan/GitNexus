@@ -17,7 +17,11 @@ function runHelp(command: string, env: NodeJS.ProcessEnv = {}) {
 }
 
 function runHelpArgs(args: string[], env: NodeJS.ProcessEnv = {}) {
-  return spawnSync(process.execPath, ['--import', 'tsx', cliEntry, ...args, '--help'], {
+  return runCliArgs([...args, '--help'], env);
+}
+
+function runCliArgs(args: string[], env: NodeJS.ProcessEnv = {}) {
+  return spawnSync(process.execPath, ['--import', 'tsx', cliEntry, ...args], {
     cwd: repoRoot,
     encoding: 'utf8',
     env: { ...process.env, ...env },
@@ -233,6 +237,42 @@ describe('CLI help surface', () => {
       const result = runHelp(cmd);
       expect(result.status, cmd).toBe(0);
       expect(result.stdout, cmd).toContain('--branch <name>');
+    }
+  });
+
+  it('watch help exposes lifecycle actions and state files', () => {
+    const result = runHelp('watch');
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('gitnexus watch [options] [action]');
+    expect(result.stdout).toContain('Actions: init, start (default), restart, stop, status');
+    expect(result.stdout).toContain('GITNEXUS_HOME/watch_config.yml');
+    expect(result.stdout).toContain('GITNEXUS_HOME/watch/watch.pid');
+    expect(result.stdout).toContain('GITNEXUS_HOME/watch/project_commit_info.txt');
+  });
+
+  it('watch init creates the default watch_config.yml and does not overwrite it', () => {
+    const home = fs.mkdtempSync(path.join(repoRoot, '.tmp-test/gitnexus-watch-init-'));
+    try {
+      const first = runCliArgs(['watch', 'init'], { GITNEXUS_HOME: home });
+      const configPath = path.join(home, 'watch_config.yml');
+
+      expect(first.status).toBe(0);
+      expect(first.stdout).toContain(`Created ${configPath}`);
+      const config = fs.readFileSync(configPath, 'utf8');
+      expect(config).toContain('sync_interval_minutes: 10');
+      expect(config).toContain('analyze_failure_threshold: 3');
+      expect(config).toContain(`local_path: ${path.join(home, 'repo')}`);
+      expect(config).not.toContain('/abs/path/to/repos');
+      expect(config).toContain('git@github.com:owner/repo.git');
+
+      const second = runCliArgs(['watch', 'init'], { GITNEXUS_HOME: home });
+
+      expect(second.status).toBe(1);
+      expect(second.stderr).toContain(`Config already exists: ${configPath}`);
+      expect(fs.readFileSync(configPath, 'utf8')).toBe(config);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 

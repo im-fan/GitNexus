@@ -16,20 +16,24 @@ vi.mock('../../src/core/logger.js', () => ({
 
 import {
   extractRepoName,
+  extractWebRepoName,
   getCloneDir,
   validateGitUrl,
   cloneOrPull,
   buildCloneArgs,
+  buildBranchCloneArgs,
   buildGitEnv,
   normalizeGitUrlForCompare,
   assertRemoteMatchesRequestedUrl,
   isAzureDevOpsUrl,
   warnIfInsecureAzureConfig,
+  runGitForTest,
 } from '../../src/server/git-clone.js';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { getRemoteOriginUrl } from '../../src/storage/git.js';
 import { getGlobalDir } from '../../src/storage/repo-manager.js';
 
@@ -365,6 +369,20 @@ describe('git-clone', () => {
       expect(args.some((a) => a.toLowerCase().includes('authorization'))).toBe(false);
       expect(args.some((a) => a.includes('extraHeader'))).toBe(false);
     });
+
+    it('adds --branch before the URL separator for branch-specific clones', () => {
+      const args = buildBranchCloneArgs('git@github.com:owner/repo.git', '/safe/target', 'develop');
+      expect(args).toEqual([
+        'clone',
+        '--depth',
+        '1',
+        '--branch',
+        'develop',
+        '--',
+        'git@github.com:owner/repo.git',
+        '/safe/target',
+      ]);
+    });
   });
 
   describe('buildGitEnv — token injection', () => {
@@ -549,6 +567,57 @@ describe('git-clone', () => {
       await expect(cloneOrPull('file:///etc/passwd', fakeTarget)).rejects.toThrow(
         'Only https:// and http://',
       );
+    });
+
+    it('keeps regular cloneOrPull restricted to http and https URLs', async () => {
+      const root = await mkControlledRoot('gitnexus-controlled-root-');
+      try {
+        await expect(
+          cloneOrPull('git@github.com:owner/repo.git', path.join(root, 'repo'), undefined, {
+            allowedCloneRoot: root,
+            expectedRepoName: 'repo',
+          }),
+        ).rejects.toThrow('Invalid URL');
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('allows auto-sync SSH SCP clone URLs with a per-repo timeout', async () => {
+      const root = await mkControlledRoot('gitnexus-controlled-root-');
+      const target = path.join(root, 'repo');
+      const runGitForTest = vi.fn(async () => {
+        await fs.mkdir(target);
+      });
+      try {
+        await expect(
+          cloneOrPull('git@gitlab.com:group/subgroup/repo.git', target, undefined, {
+            allowedCloneRoot: root,
+            expectedRepoName: 'repo',
+            allowAutoSyncSsh: true,
+            timeoutMs: 10_000,
+            branch: 'develop',
+            runGitForTest,
+          }),
+        ).resolves.toBe(target);
+
+        expect(runGitForTest).toHaveBeenCalledWith(
+          [
+            'clone',
+            '--depth',
+            '1',
+            '--branch',
+            'develop',
+            '--',
+            'git@gitlab.com:group/subgroup/repo.git',
+            target,
+          ],
+          undefined,
+          { token: undefined, url: 'git@gitlab.com:group/subgroup/repo.git', timeoutMs: 10_000 },
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
     });
 
     it('allows an explicitly controlled auto-sync clone root outside the default root', async () => {
@@ -810,6 +879,30 @@ describe('git-clone', () => {
     });
   });
 
+  describe('extractWebRepoName — API clone compatibility', () => {
+    it('sanitizes repo names with spaces and unsafe directory characters at the web boundary', () => {
+      expect(
+        extractWebRepoName('https://dev.azure.com/org/project/_git/My Repo With Spaces'),
+      ).toBe('My_Repo_With_Spaces');
+      expect(extractWebRepoName('https://example.com/team/repo$name.git')).toBe('repo_name');
+    });
+
+    it('keeps Windows reserved names from becoming clone directories', () => {
+      expect(() => extractWebRepoName('https://example.com/team/CON.git')).toThrow(
+        'valid repository name',
+      );
+      expect(() => extractWebRepoName('https://example.com/team/NUL.txt')).toThrow(
+        'valid repository name',
+      );
+    });
+
+    it('leaves strict extractRepoName behavior unchanged for internal callers', () => {
+      expect(() => extractRepoName('https://example.com/team/repo$name.git')).toThrow(
+        'valid repository name',
+      );
+    });
+  });
+
   describe('validateGitUrl — Azure DevOps URLs', () => {
     it('allows self-hosted Azure DevOps Server URLs', () => {
       expect(() =>
@@ -985,6 +1078,43 @@ describe('git-clone', () => {
         expect(result).toBeNull();
       } finally {
         await fs.rm(tmp, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('runGit timeout', () => {
+    it('waits for close and sends SIGKILL after the grace period before returning timeout', async () => {
+      vi.useFakeTimers();
+      try {
+        const child = new EventEmitter() as EventEmitter & {
+          stderr: EventEmitter;
+          kill: ReturnType<typeof vi.fn>;
+        };
+        child.stderr = new EventEmitter();
+        child.kill = vi.fn();
+        const spawnForTest = vi.fn(() => child) as unknown as typeof spawn;
+
+        const promise = runGitForTest(['clone'], undefined, {
+          timeoutMs: 20,
+          timeoutKillGraceMs: 20,
+          spawnForTest,
+        });
+
+        await vi.advanceTimersByTimeAsync(25);
+        let settled = false;
+        promise.catch(() => {}).finally(() => {
+          settled = true;
+        });
+        await vi.runAllTicks();
+        expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+        expect(settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(25);
+        expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+        child.emit('close', null);
+        await expect(promise).rejects.toThrow('timed out after 20ms');
+      } finally {
+        vi.useRealTimers();
       }
     });
   });

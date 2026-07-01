@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { getGlobalDir } from '../../storage/repo-manager.js';
+import { getAutoSyncWatchDir } from './state.js';
 
 const DANGEROUS_ROOTS = new Set(
   [
@@ -61,6 +62,7 @@ export async function resolveConfiguredCloneRoot(localPath: string): Promise<Aut
   const root = normalizeConfiguredCloneRoot(localPath);
   assertNotDangerousRoot(root);
   await assertNoSymlinkPath(root);
+  await fs.mkdir(root, { recursive: true });
   await assertDirectoryOwnerAndPermissions(root);
   const realRoot = await fs.realpath(root);
   assertContainedOrSame(root, realRoot, 'Configured clone root realpath escaped its normalized path');
@@ -69,7 +71,7 @@ export async function resolveConfiguredCloneRoot(localPath: string): Promise<Aut
 
   return {
     root: realRoot,
-    quarantineRoot: path.join(getGlobalDir(), 'quarantine'),
+    quarantineRoot: path.join(getAutoSyncWatchDir(), 'quarantine'),
     quarantineRetentionDays: QUARANTINE_RETENTION_DAYS,
   };
 }
@@ -123,10 +125,10 @@ function assertNotDangerousRoot(root: string): void {
 function assertNotGitNexusInternalRoot(root: string): void {
   const gitnexusDir = path.resolve(getGlobalDir());
   const blocked = [
-    gitnexusDir,
     path.join(gitnexusDir, 'groups'),
     path.join(gitnexusDir, 'indexes'),
     path.join(gitnexusDir, 'quarantine'),
+    path.join(getAutoSyncWatchDir(gitnexusDir), 'quarantine'),
   ];
   for (const blockedRoot of blocked) {
     const rel = path.relative(blockedRoot, root);
