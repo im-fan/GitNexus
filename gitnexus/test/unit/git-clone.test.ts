@@ -672,7 +672,9 @@ describe('git-clone', () => {
       try {
         await new Promise<void>((resolve, reject) => {
           const proc = spawn('git', ['init'], { cwd: root, stdio: 'ignore' });
-          proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`git init ${code}`))));
+          proc.on('close', (code) =>
+            code === 0 ? resolve() : reject(new Error(`git init ${code}`)),
+          );
           proc.on('error', reject);
         });
         await fs.rename(path.join(root, '.git'), path.join(target, '.git')).catch(async () => {
@@ -719,9 +721,9 @@ describe('git-clone', () => {
         ).rejects.toThrow('git clone failed');
 
         const entries = await fs.readdir(quarantineRoot);
-        expect(entries.some((entry) => entry.startsWith('auto-sync-') && entry.endsWith('-repo'))).toBe(
-          true,
-        );
+        expect(
+          entries.some((entry) => entry.startsWith('auto-sync-') && entry.endsWith('-repo')),
+        ).toBe(true);
       } finally {
         await fs.rm(root, { recursive: true, force: true });
       }
@@ -881,9 +883,9 @@ describe('git-clone', () => {
 
   describe('extractWebRepoName — API clone compatibility', () => {
     it('sanitizes repo names with spaces and unsafe directory characters at the web boundary', () => {
-      expect(
-        extractWebRepoName('https://dev.azure.com/org/project/_git/My Repo With Spaces'),
-      ).toBe('My_Repo_With_Spaces');
+      expect(extractWebRepoName('https://dev.azure.com/org/project/_git/My Repo With Spaces')).toBe(
+        'My_Repo_With_Spaces',
+      );
       expect(extractWebRepoName('https://example.com/team/repo$name.git')).toBe('repo_name');
     });
 
@@ -1102,9 +1104,11 @@ describe('git-clone', () => {
 
         await vi.advanceTimersByTimeAsync(25);
         let settled = false;
-        promise.catch(() => {}).finally(() => {
-          settled = true;
-        });
+        promise
+          .catch(() => {})
+          .finally(() => {
+            settled = true;
+          });
         await vi.runAllTicks();
         expect(child.kill).toHaveBeenCalledWith('SIGTERM');
         expect(settled).toBe(false);

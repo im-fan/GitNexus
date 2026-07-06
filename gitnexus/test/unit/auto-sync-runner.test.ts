@@ -13,7 +13,11 @@ import {
   startAutoSyncWatch,
   stopAutoSyncWatch,
 } from '../../src/core/auto-sync/index.js';
-import type { AutoSyncConfig, AutoSyncRunDeps, AutoSyncWatchPaths } from '../../src/core/auto-sync/index.js';
+import type {
+  AutoSyncConfig,
+  AutoSyncRunDeps,
+  AutoSyncWatchPaths,
+} from '../../src/core/auto-sync/index.js';
 
 const config: AutoSyncConfig = {
   configPath: '/tmp/.gitnexus/watch_config.yml',
@@ -44,7 +48,11 @@ function withCloneRoot(deps: Partial<AutoSyncRunDeps>): Partial<AutoSyncRunDeps>
   };
 }
 
-async function writeWatchOwner(paths: AutoSyncWatchPaths, pid: number, ownerId = `owner-${pid}`): Promise<string> {
+async function writeWatchOwner(
+  paths: AutoSyncWatchPaths,
+  pid: number,
+  ownerId = `owner-${pid}`,
+): Promise<string> {
   await fs.mkdir(path.dirname(paths.pidPath), { recursive: true });
   await fs.writeFile(paths.pidPath, `${pid}\n`);
   await fs.writeFile(
@@ -473,7 +481,9 @@ describe('auto-sync runner', () => {
       }),
     );
     expect(errorLogger).toHaveBeenCalledWith(
-      expect.stringContaining('Repository sync failed for git@gitee.com:qts_server/failing_sync.git'),
+      expect.stringContaining(
+        'Repository sync failed for git@gitee.com:qts_server/failing_sync.git',
+      ),
     );
     expect(errorLogger).toHaveBeenCalledWith(
       expect.stringContaining('Analysis failed for /tmp/repos/qts_account'),
@@ -540,7 +550,9 @@ describe('auto-sync runner', () => {
         return remoteUrl.includes('/one.git') ? '/tmp/repos/one' : '/tmp/repos/two';
       }),
       getCurrentBranch: vi.fn(() => 'master'),
-      getCurrentCommit: vi.fn((repoPath) => (repoPath.endsWith('/one') ? 'one-commit' : 'two-commit')),
+      getCurrentCommit: vi.fn((repoPath) =>
+        repoPath.endsWith('/one') ? 'one-commit' : 'two-commit',
+      ),
       runFullAnalysis: vi.fn(async () => ({ stats: { files: 1 } }) as any),
       registerRepo: vi.fn(async () => 'repo'),
       loadState: vi.fn(async () => ({})),
@@ -792,17 +804,10 @@ describe('auto-sync runner', () => {
       await fs.mkdir(groupDir, { recursive: true });
       await fs.writeFile(
         path.join(groupDir, 'group.yaml'),
-        [
-          'version: 1',
-          'name: back_end',
-          'repos:',
-          '  hr/hiring/backend: qts_account',
-        ].join('\n'),
+        ['version: 1', 'name: back_end', 'repos:', '  hr/hiring/backend: qts_account'].join('\n'),
       );
 
-      await expect(addRepoToGroup({ groupName: 'back_end' }, 'qts_account')).resolves.toBe(
-        false,
-      );
+      await expect(addRepoToGroup({ groupName: 'back_end' }, 'qts_account')).resolves.toBe(false);
 
       await expect(fs.readFile(path.join(groupDir, 'group.yaml'), 'utf-8')).resolves.toContain(
         'hr/hiring/backend: qts_account',
@@ -854,7 +859,9 @@ describe('auto-sync starter', () => {
       expect(setIntervalFn).toHaveBeenCalledWith(expect.any(Function), 300_000);
       expect(timer.unref).toHaveBeenCalled();
       await vi.waitFor(() => {
-        expect(stderr.write).toHaveBeenCalledWith(expect.stringContaining('[auto-sync] Watch loop started at '));
+        expect(stderr.write).toHaveBeenCalledWith(
+          expect.stringContaining('[auto-sync] Watch loop started at '),
+        );
         expect(stderr.write).toHaveBeenCalledWith(
           '[auto-sync] Watch loop finished: synced=0 analyzed=0 skipped=0 failed=0.\n',
         );
@@ -935,7 +942,9 @@ describe('auto-sync starter', () => {
       });
 
       expect(handle).toBeNull();
-      expect(stderr.write).toHaveBeenCalledWith('[auto-sync] Watch is already running with pid 12345.\n');
+      expect(stderr.write).toHaveBeenCalledWith(
+        '[auto-sync] Watch is already running with pid 12345.\n',
+      );
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
@@ -1014,7 +1023,9 @@ describe('auto-sync starter', () => {
       });
 
       expect(handle).toBeNull();
-      expect(stderr.write).toHaveBeenCalledWith('[auto-sync] Watch is already running with pid 12345.\n');
+      expect(stderr.write).toHaveBeenCalledWith(
+        '[auto-sync] Watch is already running with pid 12345.\n',
+      );
       expect(await fs.readFile(paths.lockPath, 'utf-8')).toContain('starting-owner');
       await expect(fs.access(paths.pidPath)).rejects.toThrow();
     } finally {
@@ -1073,7 +1084,11 @@ describe('auto-sync starter', () => {
         stopAutoSyncWatch({
           paths,
           stderr: { write: vi.fn() },
-          deps: { isProcessAlive: vi.fn(() => false), killProcess: vi.fn(), sleep: vi.fn(async () => {}) },
+          deps: {
+            isProcessAlive: vi.fn(() => false),
+            killProcess: vi.fn(),
+            sleep: vi.fn(async () => {}),
+          },
         }),
       ).resolves.toBe(false);
 
@@ -1146,7 +1161,9 @@ describe('auto-sync starter', () => {
         }),
       ).resolves.toBe(false);
 
-      await expect(readAutoSyncWatchStatus(paths, { isProcessAlive: vi.fn(() => true) })).resolves.toMatchObject({
+      await expect(
+        readAutoSyncWatchStatus(paths, { isProcessAlive: vi.fn(() => true) }),
+      ).resolves.toMatchObject({
         state: 'stopping',
         pid: 12345,
         message: expect.stringContaining('did not exit'),
@@ -1182,7 +1199,9 @@ describe('auto-sync starter', () => {
       ).resolves.toBe(false);
 
       expect(killProcess).not.toHaveBeenCalled();
-      await expect(readAutoSyncWatchStatus(paths, { isProcessAlive: vi.fn(() => true) })).resolves.toMatchObject({
+      await expect(
+        readAutoSyncWatchStatus(paths, { isProcessAlive: vi.fn(() => true) }),
+      ).resolves.toMatchObject({
         state: 'error',
         pid: 12345,
         message: expect.stringContaining('owner'),

@@ -48,15 +48,17 @@ export function getAutoSyncWatchPaths(gitnexusDir = getGlobalDir()): AutoSyncWat
   };
 }
 
-export async function startAutoSyncWatch(options: {
-  setIntervalFn?: typeof setInterval;
-  clearIntervalFn?: typeof clearInterval;
-  runOnce?: typeof runAutoSyncOnce;
-  stderr?: Pick<NodeJS.WriteStream, 'write'>;
-  keepAlive?: boolean;
-  paths?: AutoSyncWatchPaths;
-  deps?: Partial<AutoSyncWatchControlDeps>;
-} = {}): Promise<AutoSyncStartHandle | null> {
+export async function startAutoSyncWatch(
+  options: {
+    setIntervalFn?: typeof setInterval;
+    clearIntervalFn?: typeof clearInterval;
+    runOnce?: typeof runAutoSyncOnce;
+    stderr?: Pick<NodeJS.WriteStream, 'write'>;
+    keepAlive?: boolean;
+    paths?: AutoSyncWatchPaths;
+    deps?: Partial<AutoSyncWatchControlDeps>;
+  } = {},
+): Promise<AutoSyncStartHandle | null> {
   const stderr = options.stderr ?? process.stderr;
   const paths = options.paths ?? getAutoSyncWatchPaths();
   const deps = resolveWatchDeps(options.deps);
@@ -199,13 +201,15 @@ async function acquireWatchLock(
   }
 }
 
-export async function stopAutoSyncWatch(options: {
-  paths?: AutoSyncWatchPaths;
-  stderr?: Pick<NodeJS.WriteStream, 'write'>;
-  deps?: Partial<AutoSyncWatchControlDeps>;
-  timeoutMs?: number;
-  pollMs?: number;
-} = {}): Promise<boolean> {
+export async function stopAutoSyncWatch(
+  options: {
+    paths?: AutoSyncWatchPaths;
+    stderr?: Pick<NodeJS.WriteStream, 'write'>;
+    deps?: Partial<AutoSyncWatchControlDeps>;
+    timeoutMs?: number;
+    pollMs?: number;
+  } = {},
+): Promise<boolean> {
   const stderr = options.stderr ?? process.stderr;
   const paths = options.paths ?? getAutoSyncWatchPaths();
   const deps = resolveWatchDeps(options.deps);
@@ -428,14 +432,20 @@ async function readStatusFile(statusPath: string): Promise<WatchStatusRecord | u
   }
 }
 
-async function writeWatchStatus(paths: AutoSyncWatchPaths, record: WatchStatusRecord): Promise<void> {
+async function writeWatchStatus(
+  paths: AutoSyncWatchPaths,
+  record: WatchStatusRecord,
+): Promise<void> {
   await fs.mkdir(path.dirname(paths.statusPath), { recursive: true });
   const tmpPath = `${paths.statusPath}.tmp.${process.pid}.${Date.now()}`;
   await fs.writeFile(tmpPath, `${JSON.stringify(record, null, 2)}\n`, 'utf-8');
   await fs.rename(tmpPath, paths.statusPath);
 }
 
-async function cleanupWatchFiles(paths: AutoSyncWatchPaths, lockHandle?: fs.FileHandle): Promise<void> {
+async function cleanupWatchFiles(
+  paths: AutoSyncWatchPaths,
+  lockHandle?: fs.FileHandle,
+): Promise<void> {
   await lockHandle?.close().catch(() => {});
   await removeIfExists(paths.pidPath);
   await removeIfExists(paths.lockPath);

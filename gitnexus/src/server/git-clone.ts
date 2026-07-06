@@ -790,11 +790,7 @@ export function buildGitEnv(
 // host-scoped Authorization header (GitHub PAT for github.com, else the
 // server's AZURE_DEVOPS_PAT for Azure hosts) via the GIT_CONFIG_* protocol —
 // never in argv. See resolveGitCredential / buildExtraHeaderKey.
-function runGit(
-  args: string[],
-  cwd?: string,
-  options?: RunGitOptions,
-): Promise<void> {
+function runGit(args: string[], cwd?: string, options?: RunGitOptions): Promise<void> {
   return new Promise((resolve, reject) => {
     const spawnGit = options?.spawnForTest ?? spawn;
     const proc = spawnGit('git', args, {

@@ -209,7 +209,9 @@ export function parseAutoSyncConfig(content: string, configPath: string): AutoSy
 export function validateAutoSyncRemoteUrl(remoteUrl: string): void {
   const match = /^git@([^:\s/]+):([^\s]+)$/.exec(remoteUrl.trim());
   if (!match) {
-    throw new Error('must use git@github.com:owner/repo.git, git@gitlab.com:group/repo.git, or git@gitee.com:owner/repo.git');
+    throw new Error(
+      'must use git@github.com:owner/repo.git, git@gitlab.com:group/repo.git, or git@gitee.com:owner/repo.git',
+    );
   }
   const host = match[1].toLowerCase();
   const repoPath = match[2];
@@ -223,7 +225,8 @@ export function validateAutoSyncRemoteUrl(remoteUrl: string): void {
 
 export function validateAutoSyncBranchName(branch: string): void {
   if (!branch.trim()) throw new Error('must not be empty');
-  if (/[\s\0-\x1f\x7f]/.test(branch)) throw new Error('must not contain whitespace or control characters');
+  if (/[\s\0-\x1f\x7f]/.test(branch))
+    throw new Error('must not contain whitespace or control characters');
   if (/[~^:?*[\\]/.test(branch)) throw new Error('contains characters not allowed in a git ref');
   if (branch.startsWith('-')) throw new Error('must not start with "-"');
   if (branch.includes('..')) throw new Error('must not contain ".."');

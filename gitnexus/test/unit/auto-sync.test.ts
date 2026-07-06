@@ -176,14 +176,14 @@ describe('auto-sync', () => {
 
   it('hard-fails unsafe configured clone roots', async () => {
     await expect(resolveConfiguredCloneRoot('/')).rejects.toThrow('unsafe auto-sync clone root');
-    await expect(resolveConfiguredCloneRoot(os.homedir())).rejects.toThrow('unsafe auto-sync clone root');
-    await expect(resolveConfiguredCloneRoot(path.join(await fs.realpath(os.tmpdir()), 'repos'))).rejects.toThrow(
+    await expect(resolveConfiguredCloneRoot(os.homedir())).rejects.toThrow(
       'unsafe auto-sync clone root',
     );
+    await expect(
+      resolveConfiguredCloneRoot(path.join(await fs.realpath(os.tmpdir()), 'repos')),
+    ).rejects.toThrow('unsafe auto-sync clone root');
     const root = path.join(tempDir, 'repos');
-    await expect(resolveConfiguredCloneRoot(`${root}/../repos`)).rejects.toThrow(
-      'normalized',
-    );
+    await expect(resolveConfiguredCloneRoot(`${root}/../repos`)).rejects.toThrow('normalized');
   });
 
   it('rejects GitNexus internal directory descendants as clone roots', async () => {
@@ -258,7 +258,9 @@ describe('auto-sync', () => {
     expect(extractRepoNameFromRemoteUrl('git@gitee.com:qts_server/qts_account.git')).toBe(
       'qts_account',
     );
-    expect(extractRepoNameFromRemoteUrl('git@gitlab.com:team/subgroup/repo-name.git')).toBe('repo-name');
+    expect(extractRepoNameFromRemoteUrl('git@gitlab.com:team/subgroup/repo-name.git')).toBe(
+      'repo-name',
+    );
   });
 
   it('rejects unsafe repository names without sanitizing them', () => {
@@ -271,11 +273,19 @@ describe('auto-sync', () => {
   it('allows only github, gitlab, and gitee SSH SCP remote URLs', () => {
     expect(() => validateAutoSyncRemoteUrl('git@github.com:im-fan/multica.git')).not.toThrow();
     expect(() => validateAutoSyncRemoteUrl('git@gitlab.com:group/subgroup/repo.git')).not.toThrow();
-    expect(() => validateAutoSyncRemoteUrl('git@gitee.com:qts-ops/qts-code-engineering.git')).not.toThrow();
-    expect(() => validateAutoSyncRemoteUrl('https://github.com/owner/repo.git')).toThrow('must use');
-    expect(() => validateAutoSyncRemoteUrl('ssh://git@github.com/owner/repo.git')).toThrow('must use');
+    expect(() =>
+      validateAutoSyncRemoteUrl('git@gitee.com:qts-ops/qts-code-engineering.git'),
+    ).not.toThrow();
+    expect(() => validateAutoSyncRemoteUrl('https://github.com/owner/repo.git')).toThrow(
+      'must use',
+    );
+    expect(() => validateAutoSyncRemoteUrl('ssh://git@github.com/owner/repo.git')).toThrow(
+      'must use',
+    );
     expect(() => validateAutoSyncRemoteUrl('user@github.com:owner/repo.git')).toThrow('must use');
-    expect(() => validateAutoSyncRemoteUrl('git@example.com:owner/repo.git')).toThrow('host must be');
+    expect(() => validateAutoSyncRemoteUrl('git@example.com:owner/repo.git')).toThrow(
+      'host must be',
+    );
   });
 
   it('parses repo git timeout durations', () => {
@@ -318,9 +328,7 @@ describe('auto-sync', () => {
         previousStatus: 'failed',
       }),
     ).toBe(true);
-    expect(shouldAnalyzeCommit({ currentCommit: 'def', previousAnalyzedCommit: 'abc' })).toBe(
-      true,
-    );
+    expect(shouldAnalyzeCommit({ currentCommit: 'def', previousAnalyzedCommit: 'abc' })).toBe(true);
   });
 
   it('saves state atomically and reloads it', async () => {
@@ -345,13 +353,13 @@ describe('auto-sync', () => {
     );
     await expect(loadAutoSyncState(statePath)).resolves.toEqual({
       '/tmp/repos/qts_account|master': {
-          codeCommitId: 'abc',
-          analyzedCommitId: 'abc',
-          lastAnalyzeStatus: 'success',
-          analyzeConsecutiveFailures: 2,
-          lastAnalyzeError: 'old error',
-          lastSyncTime: '2026-06-30T00:00:00.000Z',
-        },
+        codeCommitId: 'abc',
+        analyzedCommitId: 'abc',
+        lastAnalyzeStatus: 'success',
+        analyzeConsecutiveFailures: 2,
+        lastAnalyzeError: 'old error',
+        lastSyncTime: '2026-06-30T00:00:00.000Z',
+      },
     });
   });
 

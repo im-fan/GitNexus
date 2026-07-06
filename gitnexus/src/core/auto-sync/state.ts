@@ -106,7 +106,12 @@ export interface ProjectCommitInfoEntry {
   branch?: string;
   codeCommitId?: string;
   analyzedCommitId?: string;
-  status: AutoSyncAnalyzeStatus | 'sync_failed' | 'branch_skipped' | 'branch_unavailable' | 'sync_timeout';
+  status:
+    | AutoSyncAnalyzeStatus
+    | 'sync_failed'
+    | 'branch_skipped'
+    | 'branch_unavailable'
+    | 'sync_timeout';
   analyzeConsecutiveFailures?: number;
   analyzeFailureThreshold?: number;
   lastAnalyzeError?: string;

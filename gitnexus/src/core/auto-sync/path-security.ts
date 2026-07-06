@@ -65,7 +65,11 @@ export async function resolveConfiguredCloneRoot(localPath: string): Promise<Aut
   await fs.mkdir(root, { recursive: true });
   await assertDirectoryOwnerAndPermissions(root);
   const realRoot = await fs.realpath(root);
-  assertContainedOrSame(root, realRoot, 'Configured clone root realpath escaped its normalized path');
+  assertContainedOrSame(
+    root,
+    realRoot,
+    'Configured clone root realpath escaped its normalized path',
+  );
   assertNotDangerousRoot(realRoot);
   assertNotGitNexusInternalRoot(realRoot);
 
@@ -90,7 +94,10 @@ export function normalizeConfiguredCloneRoot(localPath: string): string {
   return resolved;
 }
 
-export async function quarantineAutoSyncPartial(targetDir: string, quarantineRoot: string): Promise<string> {
+export async function quarantineAutoSyncPartial(
+  targetDir: string,
+  quarantineRoot: string,
+): Promise<string> {
   await fs.mkdir(quarantineRoot, { recursive: true, mode: 0o700 });
   const base = path.basename(targetDir);
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -119,7 +126,8 @@ function assertNotDangerousRoot(root: string): void {
       throw new Error(`Refusing unsafe auto-sync clone root under ${dangerousRoot}: ${root}`);
     }
   }
-  if (path.parse(root).root === root) throw new Error(`Refusing filesystem root as clone root: ${root}`);
+  if (path.parse(root).root === root)
+    throw new Error(`Refusing filesystem root as clone root: ${root}`);
 }
 
 function assertNotGitNexusInternalRoot(root: string): void {
@@ -151,7 +159,8 @@ async function assertNoSymlinkPath(root: string): Promise<void> {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') break;
       throw err;
     }
-    if (stat.isSymbolicLink()) throw new Error(`Refusing symlink in auto-sync clone root path: ${current}`);
+    if (stat.isSymbolicLink())
+      throw new Error(`Refusing symlink in auto-sync clone root path: ${current}`);
   }
 }
 

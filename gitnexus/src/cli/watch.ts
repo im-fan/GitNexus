@@ -68,9 +68,13 @@ async function initWatchConfig(): Promise<void> {
   const configPath = getAutoSyncConfigPath();
   try {
     await fs.mkdir(path.dirname(configPath), { recursive: true });
-    await fs.writeFile(configPath, defaultSyncConfig(path.resolve(path.dirname(configPath), 'repo')), {
-      flag: 'wx',
-    });
+    await fs.writeFile(
+      configPath,
+      defaultSyncConfig(path.resolve(path.dirname(configPath), 'repo')),
+      {
+        flag: 'wx',
+      },
+    );
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
       process.stderr.write(`[auto-sync] Config already exists: ${configPath}\n`);

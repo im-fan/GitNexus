@@ -83,7 +83,10 @@ export async function runAutoSyncOnce(
   const groupsToSync = new Set<string>();
   const result: AutoSyncRunResult = { synced: 0, analyzed: 0, skippedAnalysis: 0, failed: 0 };
   const commitInfoEntries: ProjectCommitInfoEntry[] = [];
-  const actualConcurrency = resolveActualConcurrency(config.maxConcurrency, deps.getAvailableMemoryGB());
+  const actualConcurrency = resolveActualConcurrency(
+    config.maxConcurrency,
+    deps.getAvailableMemoryGB(),
+  );
   logger.info(
     `[auto-sync] Starting sync loop with max_concurrency=${actualConcurrency} analyze_failure_threshold=${config.analyzeFailureThreshold}.`,
   );
@@ -182,7 +185,9 @@ export async function runAutoSyncOnce(
         lastSyncTime,
       };
     } catch (err: unknown) {
-      logger.error(`[auto-sync] Repository sync failed for ${item.remoteUrl}: ${(err as Error).message}`);
+      logger.error(
+        `[auto-sync] Repository sync failed for ${item.remoteUrl}: ${(err as Error).message}`,
+      );
       return {
         kind: 'failed' as const,
         project: item.project,
@@ -258,7 +263,9 @@ export async function runAutoSyncOnce(
         groupMembershipOk = true;
       } catch (err: unknown) {
         result.failed += 1;
-        logger.error(`[auto-sync] Group update failed for ${repoResult.project.groupName}: ${(err as Error).message}`);
+        logger.error(
+          `[auto-sync] Group update failed for ${repoResult.project.groupName}: ${(err as Error).message}`,
+        );
       }
       if (groupMembershipOk && repoResult.analyzeStatus === 'success') {
         groupsToSync.add(repoResult.project.groupName);
@@ -321,7 +328,10 @@ export function resolveActualConcurrency(configured: number, availableMemoryGB: 
   return Math.max(1, Math.min(configured, memoryLimit));
 }
 
-async function buildWorkItems(config: AutoSyncConfig, deps: AutoSyncRunDeps): Promise<AutoSyncWorkItem[]> {
+async function buildWorkItems(
+  config: AutoSyncConfig,
+  deps: AutoSyncRunDeps,
+): Promise<AutoSyncWorkItem[]> {
   const items: AutoSyncWorkItem[] = [];
   const targetOwners = new Map<string, string>();
   for (const project of config.projects) {
@@ -332,7 +342,9 @@ async function buildWorkItems(config: AutoSyncConfig, deps: AutoSyncRunDeps): Pr
         const targetDir = getConfiguredRepoPath({ localPath: cloneRoot.root }, repoName);
         const previous = targetOwners.get(targetDir);
         if (previous !== undefined) {
-          throw new Error(`Duplicate auto-sync targetDir ${targetDir} for ${previous} and ${remoteUrl}`);
+          throw new Error(
+            `Duplicate auto-sync targetDir ${targetDir} for ${previous} and ${remoteUrl}`,
+          );
         }
         targetOwners.set(targetDir, remoteUrl);
       } catch (err: unknown) {
