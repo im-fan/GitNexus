@@ -385,7 +385,7 @@ Configure the behavior with two environment variables:
 | -------------------------------------------- | ---------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GITNEXUS_LBUG_EXTENSION_INSTALL`            | `auto`, `load-only`, `never` | `auto`              | `auto` runs one bounded INSTALL if LOAD fails. `load-only` only uses already-installed extensions (recommended for offline / firewalled environments). `never` skips optional extensions entirely.                                                                                       |
 | `GITNEXUS_LBUG_EXTENSION_INSTALL_TIMEOUT_MS` | positive integer             | `15000`             | Wall-clock budget for the out-of-process `INSTALL` child before it is killed.                                                                                                                                                                                                            |
-| `GITNEXUS_FTS_STEMMER`                       | supported LadybugDB stemmer  | `porter`            | Stemmer used when rebuilding BM25/FTS indexes. Use `none` for CJK-heavy repositories, or a language stemmer such as `german`, `french`, or `spanish` when that better matches repository comments and identifiers. Re-run `gitnexus analyze --repair-fts` after changing it.              |
+| `GITNEXUS_FTS_STEMMER`                       | supported LadybugDB stemmer  | `porter`            | Stemmer used when rebuilding BM25/FTS indexes. Use `none` for CJK-heavy repositories, or a language stemmer such as `german`, `french`, or `spanish` when that better matches repository comments and identifiers. Re-run `gitnexus analyze --repair-fts` after changing it.             |
 | `GITNEXUS_WAL_CHECKPOINT_THRESHOLD`          | integer `>= -1`              | `67108864` (64 MiB) | LadybugDB WAL auto-checkpoint threshold during analyze (bytes). Auto-checkpoint remains enabled; `-1` keeps Ladybug's stock ~16 MiB. Larger thresholds reduce checkpoint frequency but increase the WAL size at rotation time — choose a smaller value on disk-constrained environments. |
 
 ```bash
@@ -456,9 +456,9 @@ Three env vars expose the pool's resilience layers (respawn budget, cumulative-t
 
 After scope resolution, analyze prunes inert block-local value symbols (a function-local `const`/`let`/`var` that ends up with only its structural `File→DEFINES` edge) to keep the graph focused on cross-symbol relationships. Module/file-scope symbols, class members, and any local with a real edge are always kept.
 
-| Variable                             | Default | Effect                                                                                                  |
-| ------------------------------------ | ------- | ------------------------------------------------------------------------------------------------------- |
-| `GITNEXUS_KEEP_LOCAL_VALUE_SYMBOLS`  | unset   | Set to `1`/`true` to keep inert block-local value symbols instead of pruning them.                      |
+| Variable                            | Default | Effect                                                                             |
+| ----------------------------------- | ------- | ---------------------------------------------------------------------------------- |
+| `GITNEXUS_KEEP_LOCAL_VALUE_SYMBOLS` | unset   | Set to `1`/`true` to keep inert block-local value symbols instead of pruning them. |
 
 Programmatic callers can pass `keepLocalValueSymbols: true` in `PipelineOptions` instead of setting the env var.
 
