@@ -398,7 +398,6 @@ gitnexus analyze --workers <n>   # Parse worker pool size (>=1; default: cores-1
                                  # auto-sized to the repo). 0 is rejected — there is no sequential mode.
 gitnexus analyze --wal-checkpoint-threshold 67108864  # LadybugDB WAL auto-checkpoint threshold in bytes
                                  # (default 67108864 = 64 MiB; -1 keeps Ladybug stock ~16 MiB)
-gitnexus watch [init|start|restart|stop|status]  # Control auto-sync from GITNEXUS_HOME/watch_config.yml
 ```
 
 If `analyze` reports a worker parse timeout on a large or unusual repository, it keeps running and falls back safely. To give slow worker jobs more time, use `--worker-timeout 60` or set `GITNEXUS_WORKER_SUB_BATCH_TIMEOUT_MS=60000`. For very large files, `GITNEXUS_WORKER_SUB_BATCH_MAX_BYTES` controls the worker job byte budget.
@@ -412,6 +411,42 @@ gitnexus analyze --embeddings 100000   # custom cap
 ```
 
 If embeddings are skipped on a large repository, the indexed graph likely exceeds the default cap — re-run with `--embeddings 0` or a higher limit.
+
+</details>
+
+<details>
+<summary><strong>Keep remote repositories indexed with <code>gitnexus watch</code></strong></summary>
+
+`gitnexus watch` clones or pulls configured repositories, analyzes new commits, and optionally syncs their group. It runs once immediately, then repeats on the configured interval. It runs in the foreground; use your process manager if it must survive a shell session.
+
+```bash
+# 1. Create the config once. It never overwrites an existing file.
+gitnexus watch init
+
+# 2. Edit $GITNEXUS_HOME/watch_config.yml, then start it.
+gitnexus watch start              # `gitnexus watch` is equivalent
+gitnexus watch status
+gitnexus watch restart            # Required after config changes
+gitnexus watch stop
+```
+
+`GITNEXUS_HOME` defaults to `~/.gitnexus`. A minimal configuration:
+
+```yaml
+sync_interval_minutes: 10
+projects:
+  - local_path: /absolute/path/to/clones
+    branches: [main, master]
+    remote_urls:
+      - git@github.com:owner/repo.git
+```
+
+- `sync_interval_minutes` must be at least `5`; `local_path` must be an absolute path.
+- Remote URLs must use SSH SCP form and are limited to GitHub, GitLab, or Gitee.
+- `branches` are tried in order. The legacy `branch` field is supported, but do not set both.
+- Add `group_name` only after creating that group with `gitnexus group create <name>`.
+
+See the [full watch configuration and runtime reference](gitnexus/README.md#gitnexus-watch) for concurrency, timeouts, failure thresholds, and runtime files.
 
 </details>
 

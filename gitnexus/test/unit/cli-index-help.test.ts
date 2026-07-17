@@ -20,16 +20,11 @@ function runHelpArgs(args: string[], env: NodeJS.ProcessEnv = {}) {
 }
 
 function runCliArgs(args: string[], env: NodeJS.ProcessEnv = {}) {
-  return spawnSync(process.execPath, ['--import', 'tsx', cliEntry, ...args], {
+  return spawnSync(process.execPath, [...CLI_SPAWN_PREFIX, ...args], {
     cwd: repoRoot,
     encoding: 'utf8',
     env: { ...process.env, ...env },
   });
-  // return spawnSync(process.execPath, [...CLI_SPAWN_PREFIX, ...args, '--help'], {
-  //   cwd: repoRoot,
-  //   encoding: 'utf8',
-  //   env: { ...process.env, ...env },
-  // });
 }
 
 function runRootHelp(env: NodeJS.ProcessEnv = {}) {
