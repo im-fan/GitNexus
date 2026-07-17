@@ -33,6 +33,7 @@ import {
   persistParsedFileChunk,
   getDurableParsedFileDir,
   loadDurableParsedFileIndex,
+  prepareDurableParsedFileChunk,
   restoreDurableParsedFileShard,
 } from '../../../storage/parsedfile-store.js';
 import type { ParseWorkerResult } from '../workers/parse-worker.js';
@@ -70,6 +71,7 @@ import type { WorkerPool } from '../workers/worker-pool.js';
 import type {
   ExtractedDecoratorRoute,
   ExtractedFetchCall,
+  ExtractedModuleConstants,
   ExtractedORMQuery,
   ExtractedRoute,
   ExtractedToolDef,
@@ -82,6 +84,10 @@ import type {
   ExtractedRouterModuleAlias,
 } from '../route-extractors/fastapi-router-bindings.js';
 import { normalizeExtractedRoutePath } from '../route-extractors/route-path.js';
+import {
+  resolveOperands,
+  type ModuleConstants,
+} from '../route-extractors/python-const-resolver.js';
 import {
   resolveInheritedSpringRoutes,
   type SharedSpringType,
@@ -627,6 +633,9 @@ export async function runChunkedParseAndResolve(
   const allRouterImports: ExtractedRouterImport[] = [];
   const allRouterConstructorPrefixes: ExtractedRouterConstructorPrefix[] = [];
   const allRouterModuleAliases: ExtractedRouterModuleAlias[] = [];
+  // Per-file Python module constants (#2391); resolved into decorator route paths
+  // below, after cross-file aggregation, alongside the include_router prefix pass.
+  const allModuleConstants: ExtractedModuleConstants[] = [];
   const allSpringTypes: SharedSpringType[] = [];
   const allToolDefs: ExtractedToolDef[] = [];
   const allORMQueries: ExtractedORMQuery[] = [];
@@ -789,6 +798,9 @@ export async function runChunkedParseAndResolve(
         }
         if (chunkWorkerData.routerModuleAliases?.length) {
           for (const item of chunkWorkerData.routerModuleAliases) allRouterModuleAliases.push(item);
+        }
+        if (chunkWorkerData.moduleConstants?.length) {
+          for (const item of chunkWorkerData.moduleConstants) allModuleConstants.push(item);
         }
         if (chunkWorkerData.springTypes?.length) {
           for (const item of chunkWorkerData.springTypes) allSpringTypes.push(item);
@@ -973,6 +985,19 @@ export async function runChunkedParseAndResolve(
         // Cache miss: dispatch to workers, capture the raw results, store
         // them under the chunk hash for the next run.
         chunkCacheMisses++;
+        if (durableParsedFileDir !== undefined && chunkHash !== null) {
+          try {
+            await prepareDurableParsedFileChunk(durableParsedFileDir, chunkHash);
+          } catch (err) {
+            // The durable store is an optimization — degrade like the restore
+            // path does instead of failing the analyze. Workers recreate the
+            // directory on write, so at worst the old generation lingers.
+            logger.warn(
+              { err, chunkHash: chunkHash.slice(0, 8) },
+              'parsedfile-cache: could not reset durable chunk generation; continuing',
+            );
+          }
+        }
         const progressForChunk = (current: number, _total: number, filePath: string) => {
           const globalCurrent = filesParsedSoFar + current;
           // Parse phase covers 20-70 (M2). Deferred extraction handles 70-95.
@@ -1150,6 +1175,40 @@ export async function runChunkedParseAndResolve(
 
   // FastAPI router-prefix resolution (cross-file).
   //
+  // #2391: resolve non-literal FastAPI decorator route paths (imported/composed
+  // string constants) BEFORE the include_router/APIRouter prefix pass below, so a
+  // resolved path is then prefix-joined like any literal path. Each such route
+  // carries `routePathExpr`/`routePathOperands` and an empty `routePath`; we fold
+  // the operands against the repo-wide, file-path-keyed constant map. On failure
+  // we DROP the route (KTD5 skip floor) rather than emit a phantom `POST /`.
+  if (allDecoratorRoutes.some((dr) => dr.routePathExpr !== undefined)) {
+    const repoConstants = new Map<string, ModuleConstants>();
+    for (const { filePath, constants } of allModuleConstants) {
+      repoConstants.set(filePath, constants);
+    }
+    const resolvedRoutes: ExtractedDecoratorRoute[] = [];
+    let skipped = 0;
+    for (const dr of allDecoratorRoutes) {
+      if (dr.routePathExpr === undefined) {
+        resolvedRoutes.push(dr);
+        continue;
+      }
+      const value = dr.routePathOperands
+        ? resolveOperands(dr.filePath, dr.routePathOperands, repoConstants)
+        : null;
+      if (value === null) {
+        skipped++;
+        continue;
+      }
+      resolvedRoutes.push({ ...dr, routePath: value });
+    }
+    allDecoratorRoutes.length = 0;
+    for (const dr of resolvedRoutes) allDecoratorRoutes.push(dr);
+    if (isDev && skipped > 0) {
+      logger.info(`  🧩 Resolved composed route constants; ${skipped} unresolved route(s) skipped`);
+    }
+  }
+
   // Workers emit two kinds of records per Python file:
   //   • `routerIncludes` — every `app.include_router(<routerExpr>, prefix='/x')`
   //     site, where `routerExpr` is either `<module>.router` (Shape A) or a

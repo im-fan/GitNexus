@@ -12,6 +12,7 @@ import {
 } from '../lbug/lbug-config.js';
 import { dedupeContracts, dedupeCrossLinks } from './normalization.js';
 import { createLogger } from '../logger.js';
+import { retryRename } from '../../storage/fs-atomic.js';
 
 const bridgeLogger = createLogger('bridge-db', {
   debugEnvVar: 'GITNEXUS_DEBUG_BRIDGE',
@@ -642,25 +643,6 @@ export async function closeBridgeDb(handle: BridgeHandle): Promise<void> {
 // Linux/macOS.
 
 /* ------------------------------------------------------------------ */
-/*  retryRename — handles transient EBUSY/EPERM/EACCES on Windows    */
-/* ------------------------------------------------------------------ */
-
-const RETRY_CODES = new Set(['EBUSY', 'EPERM', 'EACCES']);
-
-export async function retryRename(src: string, dst: string, attempts = 3): Promise<void> {
-  for (let i = 1; i <= attempts; i++) {
-    try {
-      await fsp.rename(src, dst);
-      return;
-    } catch (err: unknown) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (!code || !RETRY_CODES.has(code) || i === attempts) throw err;
-      await new Promise((r) => setTimeout(r, 100 * Math.pow(2, i - 1)));
-    }
-  }
-}
-
-/* ------------------------------------------------------------------ */
 /*  writeBridgeMeta / readBridgeMeta                                  */
 /* ------------------------------------------------------------------ */
 
@@ -1036,6 +1018,11 @@ export async function writeBridge(
  * 33 ("The process cannot access the file because another process has
  * locked a portion of the file"). Retrying with a small back-off lets the
  * background thread settle and the OS release the handle.
+ *
+ * As of v0.18.0 the "Could not set lock" file-lock error text gained an
+ * appended detail suffix upstream (see `lbug-config.ts`'s
+ * `OPEN_LOCK_RETRY_ATTEMPTS` comment), but the substrings matched here are
+ * unaffected by that change.
  */
 const LBUG_OPEN_RETRY_PATTERNS = [
   'process cannot access the file',
