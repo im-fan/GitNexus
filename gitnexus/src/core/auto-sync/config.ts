@@ -10,6 +10,8 @@ const yaml = _require('js-yaml') as typeof import('js-yaml');
 export const AUTO_SYNC_CONFIG_FILE = 'watch_config.yml';
 const GROUP_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const MIN_SYNC_INTERVAL_MINUTES = 5;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const MAX_SYNC_INTERVAL_MINUTES = Math.floor(MAX_TIMER_DELAY_MS / 60_000);
 const DEFAULT_REPO_GIT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_CONCURRENCY = 1;
 export const DEFAULT_ANALYZE_FAILURE_THRESHOLD = 3;
@@ -19,6 +21,7 @@ const ALLOWED_REMOTE_HOSTS = new Set(['github.com', 'gitlab.com', 'gitee.com']);
 export interface AutoSyncProjectConfig {
   localPath: string;
   groupName?: string;
+  overwriteLocalChanges: boolean;
   branches: string[];
   remoteUrls: string[];
 }
@@ -27,6 +30,7 @@ export interface AutoSyncConfig {
   configPath: string;
   syncIntervalMinutes: number;
   repoGitTimeoutMs: number;
+  analyzeTimeoutMs: number;
   maxConcurrency: number;
   analyzeFailureThreshold: number;
   projects: AutoSyncProjectConfig[];
@@ -100,6 +104,8 @@ export function parseAutoSyncConfig(content: string, configPath: string): AutoSy
     errors.push('sync_interval_minutes must be a positive integer');
   } else if (interval < MIN_SYNC_INTERVAL_MINUTES) {
     errors.push(`sync_interval_minutes must be at least ${MIN_SYNC_INTERVAL_MINUTES}`);
+  } else if (interval > MAX_SYNC_INTERVAL_MINUTES) {
+    errors.push(`sync_interval_minutes must not exceed ${MAX_SYNC_INTERVAL_MINUTES}`);
   }
 
   const maxConcurrency =
@@ -114,6 +120,24 @@ export function parseAutoSyncConfig(content: string, configPath: string): AutoSy
       : parseDurationMs(raw.repo_git_timeout);
   if (!Number.isInteger(repoGitTimeoutMs) || repoGitTimeoutMs <= 0) {
     errors.push('repo_git_timeout must be a positive duration such as 10s');
+  }
+
+  const maxAnalyzeTimeoutMs =
+    Number.isInteger(interval) &&
+    interval >= MIN_SYNC_INTERVAL_MINUTES &&
+    interval <= MAX_SYNC_INTERVAL_MINUTES
+      ? interval * 30_000
+      : undefined;
+  const analyzeTimeoutMs =
+    raw.analyze_timeout === undefined
+      ? (maxAnalyzeTimeoutMs ?? 0)
+      : parseDurationMs(raw.analyze_timeout);
+  if (!Number.isInteger(analyzeTimeoutMs) || analyzeTimeoutMs <= 0) {
+    errors.push('analyze_timeout must be a positive duration such as 30m');
+  } else if (maxAnalyzeTimeoutMs !== undefined && analyzeTimeoutMs > maxAnalyzeTimeoutMs) {
+    errors.push(
+      `analyze_timeout must not exceed half of sync_interval_minutes (${maxAnalyzeTimeoutMs / 60_000}m)`,
+    );
   }
 
   const analyzeFailureThreshold =
@@ -189,8 +213,20 @@ export function parseAutoSyncConfig(content: string, configPath: string): AutoSy
         errors.push(`projects[${index}].group_name is invalid`);
       }
 
+      const overwriteLocalChanges =
+        project.overwrite_local_changes === undefined ? false : project.overwrite_local_changes;
+      if (typeof overwriteLocalChanges !== 'boolean') {
+        errors.push(`projects[${index}].overwrite_local_changes must be a boolean`);
+      }
+
       if (localPath && remoteUrls.length > 0 && branches.length > 0) {
-        projects.push({ localPath, groupName, branches, remoteUrls });
+        projects.push({
+          localPath,
+          groupName,
+          overwriteLocalChanges: overwriteLocalChanges === true,
+          branches,
+          remoteUrls,
+        });
       }
     });
   }
@@ -200,6 +236,7 @@ export function parseAutoSyncConfig(content: string, configPath: string): AutoSy
     configPath,
     syncIntervalMinutes: interval,
     repoGitTimeoutMs,
+    analyzeTimeoutMs,
     maxConcurrency,
     analyzeFailureThreshold,
     projects,

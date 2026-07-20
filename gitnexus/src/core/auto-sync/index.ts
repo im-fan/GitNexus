@@ -34,6 +34,7 @@ export {
 } from './path-security.js';
 export {
   addRepoToGroup,
+  getAutoSyncRepoIdentity,
   getConfiguredRepoPath,
   resolveActualConcurrency,
   runAutoSyncOnce,

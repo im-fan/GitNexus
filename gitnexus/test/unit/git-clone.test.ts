@@ -52,6 +52,25 @@ async function mkControlledRoot(prefix: string): Promise<string> {
   return fs.realpath(await fs.mkdtemp(path.join(base, prefix)));
 }
 
+function runGit(args: string[], cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk;
+    });
+    proc.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk;
+    });
+    proc.on('close', (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`git ${args.join(' ')} failed (${code}): ${stderr}`));
+    });
+    proc.on('error', reject);
+  });
+}
+
 describe('git-clone', () => {
   describe('extractRepoName', () => {
     it('extracts name from HTTPS URL', () => {
@@ -588,6 +607,7 @@ describe('git-clone', () => {
       const target = path.join(root, 'repo');
       const runGitForTest = vi.fn(async () => {
         await fs.mkdir(target);
+        return '';
       });
       try {
         await expect(
@@ -698,6 +718,80 @@ describe('git-clone', () => {
           }),
         ).rejects.toThrow('not the requested URL');
       } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('switches a shallow single-branch clone to a fallback branch', async () => {
+      const root = await mkControlledRoot('gitnexus-shallow-fallback-');
+      const source = path.join(root, 'source');
+      const remote = path.join(root, 'remote.git');
+      const target = path.join(root, 'repo');
+      const remoteUrl = 'git@github.com:team/repo.git';
+      const gitConfig = path.join(root, 'gitconfig');
+      const previousGlobalConfig = process.env.GIT_CONFIG_GLOBAL;
+      const previousNoSystemConfig = process.env.GIT_CONFIG_NOSYSTEM;
+
+      try {
+        await runGit(['init', '--bare', remote], root);
+        await runGit(['init', '--initial-branch=master', source], root);
+        await runGit(['config', 'user.email', 'test@example.com'], source);
+        await runGit(['config', 'user.name', 'GitNexus Test'], source);
+        await fs.writeFile(path.join(source, 'branch.txt'), 'master\n');
+        await runGit(['add', 'branch.txt'], source);
+        await runGit(['commit', '-m', 'master'], source);
+        await runGit(['checkout', '-b', 'main'], source);
+        await fs.writeFile(path.join(source, 'branch.txt'), 'main\n');
+        await runGit(['commit', '-am', 'main'], source);
+        await runGit(['remote', 'add', 'origin', `file://${remote}`], source);
+        await runGit(['push', 'origin', 'master', 'main'], source);
+
+        await fs.writeFile(
+          gitConfig,
+          `[protocol "file"]\n\tallow = always\n[url "file://${remote}"]\n\tinsteadOf = ${remoteUrl}\n`,
+        );
+        process.env.GIT_CONFIG_GLOBAL = gitConfig;
+        process.env.GIT_CONFIG_NOSYSTEM = '1';
+
+        await runGit(['clone', '--depth', '1', '--branch', 'master', remoteUrl, target], root);
+        await expect(
+          runGit(['show-ref', '--verify', '--quiet', 'refs/remotes/origin/main'], target),
+        ).rejects.toThrow();
+        await expect(runGit(['rev-parse', '--is-shallow-repository'], target)).resolves.toBe(
+          'true\n',
+        );
+
+        await fs.writeFile(path.join(target, 'branch.txt'), 'local changes\n');
+        await expect(
+          cloneOrPull(remoteUrl, target, undefined, {
+            allowedCloneRoot: root,
+            expectedRepoName: 'repo',
+            allowAutoSyncSsh: true,
+            branch: 'main',
+          }),
+        ).rejects.toThrow();
+        await expect(fs.readFile(path.join(target, 'branch.txt'), 'utf8')).resolves.toBe(
+          'local changes\n',
+        );
+
+        await cloneOrPull(remoteUrl, target, undefined, {
+          allowedCloneRoot: root,
+          expectedRepoName: 'repo',
+          allowAutoSyncSsh: true,
+          branch: 'main',
+          overwriteLocalChanges: true,
+        });
+
+        await expect(runGit(['branch', '--show-current'], target)).resolves.toBe('main\n');
+        await expect(fs.readFile(path.join(target, 'branch.txt'), 'utf8')).resolves.toBe('main\n');
+        await expect(runGit(['rev-parse', 'main'], target)).resolves.toBe(
+          await runGit(['rev-parse', 'origin/main'], target),
+        );
+      } finally {
+        if (previousGlobalConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+        else process.env.GIT_CONFIG_GLOBAL = previousGlobalConfig;
+        if (previousNoSystemConfig === undefined) delete process.env.GIT_CONFIG_NOSYSTEM;
+        else process.env.GIT_CONFIG_NOSYSTEM = previousNoSystemConfig;
         await fs.rm(root, { recursive: true, force: true });
       }
     });

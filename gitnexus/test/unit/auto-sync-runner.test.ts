@@ -23,12 +23,14 @@ const config: AutoSyncConfig = {
   configPath: '/tmp/.gitnexus/watch_config.yml',
   syncIntervalMinutes: 10,
   repoGitTimeoutMs: 10_000,
+  analyzeTimeoutMs: 1_800_000,
   maxConcurrency: 1,
   analyzeFailureThreshold: 3,
   projects: [
     {
       localPath: '/tmp/repos',
       groupName: 'back_end',
+      overwriteLocalChanges: false,
       branches: ['master'],
       remoteUrls: ['git@gitee.com:qts_server/qts_account.git'],
     },
@@ -40,6 +42,7 @@ const cloneRoot = {
   quarantineRoot: '/tmp/.gitnexus/watch/quarantine',
   quarantineRetentionDays: 14,
 };
+const verifiedWatchCommand = 'node /gitnexus/dist/cli/index.js watch';
 
 function withCloneRoot(deps: Partial<AutoSyncRunDeps>): Partial<AutoSyncRunDeps> {
   return {
@@ -112,6 +115,7 @@ describe('auto-sync runner', () => {
         allowAutoSyncSsh: true,
         timeoutMs: 10_000,
         branch: 'master',
+        overwriteLocalChanges: false,
       },
     );
     expect(deps.getCurrentBranch).toHaveBeenCalledWith('/tmp/repos/qts_account');
@@ -123,7 +127,7 @@ describe('auto-sync runner', () => {
     expect(deps.registerRepo).toHaveBeenCalledWith(
       '/tmp/repos/qts_account',
       expect.objectContaining({ lastCommit: 'commit-2', branch: 'master' }),
-      { name: 'qts_account', allowDuplicateName: true },
+      { name: 'gitee.com/qts_server/qts_account' },
     );
     expect(deps.syncGroupByName).toHaveBeenCalledWith('back_end');
     expect(deps.writeCommitInfo).toHaveBeenCalledWith([
@@ -156,7 +160,11 @@ describe('auto-sync runner', () => {
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     });
 
-    expect(deps.addRepoToGroup).toHaveBeenCalledWith(config.projects[0], 'qts_account');
+    expect(deps.addRepoToGroup).toHaveBeenCalledWith(
+      config.projects[0],
+      'gitee.com/qts_server/qts_account',
+      'gitee.com/qts_server/qts_account',
+    );
     expect(deps.syncGroupByName).toHaveBeenCalledWith('back_end');
   });
 
@@ -188,8 +196,77 @@ describe('auto-sync runner', () => {
     });
 
     expect(result.analyzed).toBe(1);
-    expect(deps.addRepoToGroup).toHaveBeenCalledWith(config.projects[0], 'qts_account');
+    expect(deps.addRepoToGroup).toHaveBeenCalledWith(
+      config.projects[0],
+      'gitee.com/qts_server/qts_account',
+      'gitee.com/qts_server/qts_account',
+    );
     expect(deps.syncGroupByName).toHaveBeenCalledWith('back_end');
+  });
+
+  it('uses distinct registry and group identities for repositories with the same basename', async () => {
+    const duplicateConfig: AutoSyncConfig = {
+      ...config,
+      projects: [
+        {
+          localPath: '/tmp/repos-a',
+          groupName: 'back_end',
+          branches: ['main'],
+          remoteUrls: ['git@github.com:team-a/service.git'],
+        },
+        {
+          localPath: '/tmp/repos-b',
+          groupName: 'back_end',
+          branches: ['main'],
+          remoteUrls: ['git@gitlab.com:team-b/service.git'],
+        },
+      ],
+    };
+    const deps: Partial<AutoSyncRunDeps> = withCloneRoot({
+      resolveCloneRoot: vi.fn(async (localPath: string) => ({
+        ...cloneRoot,
+        root: localPath,
+      })),
+      cloneOrPull: vi.fn(async (_url, targetDir) => targetDir),
+      getCurrentBranch: vi.fn(() => 'main'),
+      getCurrentCommit: vi.fn(() => 'commit-2'),
+      runFullAnalysis: vi.fn(async () => ({ stats: { files: 1 } }) as any),
+      registerRepo: vi.fn(async () => 'service'),
+      loadState: vi.fn(async () => ({})),
+      saveState: vi.fn(async () => {}),
+      writeCommitInfo: vi.fn(async () => {}),
+      addRepoToGroup: vi.fn(async () => true),
+      syncGroupByName: vi.fn(async () => {}),
+      getAvailableMemoryGB: vi.fn(() => 8),
+    });
+
+    await runAutoSyncOnce(duplicateConfig, {
+      deps,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+
+    expect(deps.registerRepo).toHaveBeenNthCalledWith(
+      1,
+      '/tmp/repos-a/service',
+      expect.anything(),
+      { name: 'github.com/team-a/service' },
+    );
+    expect(deps.registerRepo).toHaveBeenNthCalledWith(
+      2,
+      '/tmp/repos-b/service',
+      expect.anything(),
+      { name: 'gitlab.com/team-b/service' },
+    );
+    expect(deps.addRepoToGroup).toHaveBeenCalledWith(
+      duplicateConfig.projects[0],
+      'github.com/team-a/service',
+      'github.com/team-a/service',
+    );
+    expect(deps.addRepoToGroup).toHaveBeenCalledWith(
+      duplicateConfig.projects[1],
+      'gitlab.com/team-b/service',
+      'gitlab.com/team-b/service',
+    );
   });
 
   it('skips analysis when commit id has not changed', async () => {
@@ -258,7 +335,39 @@ describe('auto-sync runner', () => {
         allowAutoSyncSsh: true,
         timeoutMs: 10_000,
         branch: 'master',
+        overwriteLocalChanges: false,
       },
+    );
+  });
+
+  it('passes the watch stop signal to the isolated analysis runner', async () => {
+    const controller = new AbortController();
+    const runAnalysis = vi.fn(async () => ({ stats: { files: 1 } }) as any);
+    const deps: Partial<AutoSyncRunDeps> = withCloneRoot({
+      cloneOrPull: vi.fn(async () => '/tmp/repos/qts_account'),
+      getCurrentBranch: vi.fn(() => 'master'),
+      getCurrentCommit: vi.fn(() => 'commit-2'),
+      runAnalysis,
+      registerRepo: vi.fn(async () => 'qts_account'),
+      loadState: vi.fn(async () => ({})),
+      saveState: vi.fn(async () => {}),
+      writeCommitInfo: vi.fn(async () => {}),
+      addRepoToGroup: vi.fn(async () => false),
+      syncGroupByName: vi.fn(async () => {}),
+      getAvailableMemoryGB: vi.fn(() => 8),
+    });
+
+    await runAutoSyncOnce(config, {
+      deps,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      signal: controller.signal,
+    });
+
+    expect(runAnalysis).toHaveBeenCalledWith(
+      '/tmp/repos/qts_account',
+      { branch: 'master', skipAgentsMd: true, skipSkills: true },
+      1_800_000,
+      controller.signal,
     );
   });
 
@@ -470,7 +579,11 @@ describe('auto-sync runner', () => {
     expect(result).toEqual({ synced: 1, analyzed: 0, skippedAnalysis: 0, failed: 2 });
     expect(deps.cloneOrPull).toHaveBeenCalledTimes(2);
     expect(deps.registerRepo).not.toHaveBeenCalled();
-    expect(deps.addRepoToGroup).toHaveBeenCalledWith(failingConfig.projects[0], 'qts_account');
+    expect(deps.addRepoToGroup).toHaveBeenCalledWith(
+      failingConfig.projects[0],
+      'gitee.com/qts_server/qts_account',
+      'gitee.com/qts_server/qts_account',
+    );
     expect(deps.syncGroupByName).not.toHaveBeenCalled();
     expect(deps.saveState).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -514,7 +627,11 @@ describe('auto-sync runner', () => {
     });
 
     expect(result).toEqual({ synced: 1, analyzed: 1, skippedAnalysis: 0, failed: 1 });
-    expect(deps.addRepoToGroup).toHaveBeenCalledWith(config.projects[0], 'qts_account');
+    expect(deps.addRepoToGroup).toHaveBeenCalledWith(
+      config.projects[0],
+      'gitee.com/qts_server/qts_account',
+      'gitee.com/qts_server/qts_account',
+    );
     expect(deps.syncGroupByName).toHaveBeenCalledWith('back_end');
     expect(errorLogger).toHaveBeenCalledWith(
       expect.stringContaining('Group sync failed for back_end'),
@@ -673,7 +790,7 @@ describe('auto-sync runner', () => {
     expect(deps.saveState).toHaveBeenCalledWith(
       expect.objectContaining({
         '/tmp/repos/qts_account|master': expect.objectContaining({
-          analyzeConsecutiveFailures: 2,
+          analyzeConsecutiveFailures: 1,
           lastAnalyzeError: 'parser crashed with stack',
           lastAnalyzeStatus: 'failed',
         }),
@@ -682,24 +799,24 @@ describe('auto-sync runner', () => {
     expect(deps.writeCommitInfo).toHaveBeenCalledWith([
       expect.objectContaining({
         status: 'failed',
-        analyzeConsecutiveFailures: 2,
+        analyzeConsecutiveFailures: 1,
         analyzeFailureThreshold: 3,
         lastAnalyzeError: 'parser crashed with stack',
       }),
     ]);
     expect(errorLogger).toHaveBeenCalledWith(
-      '[auto-sync] Analysis failed for /tmp/repos/qts_account; consecutive failures 2/3: parser crashed with stack',
+      '[auto-sync] Analysis failed for /tmp/repos/qts_account; consecutive failures 1/3: parser crashed with stack',
     );
   });
 
-  it('skips analyze when consecutive failures have reached the threshold', async () => {
+  it('retries analysis on a new commit after consecutive failures reached the threshold', async () => {
     const errorLogger = vi.fn();
     const deps: Partial<AutoSyncRunDeps> = withCloneRoot({
       cloneOrPull: vi.fn(async () => '/tmp/repos/qts_account'),
       getCurrentBranch: vi.fn(() => 'master'),
       getCurrentCommit: vi.fn(() => 'commit-2'),
-      runFullAnalysis: vi.fn(),
-      registerRepo: vi.fn(),
+      runFullAnalysis: vi.fn(async () => ({ stats: { files: 1 } }) as any),
+      registerRepo: vi.fn(async () => 'qts_account'),
       loadState: vi.fn(async () => ({
         '/tmp/repos/qts_account|master': {
           codeCommitId: 'commit-1',
@@ -723,28 +840,26 @@ describe('auto-sync runner', () => {
       now: () => new Date('2026-06-30T00:00:00.000Z'),
     });
 
-    expect(result).toEqual({ synced: 1, analyzed: 0, skippedAnalysis: 1, failed: 0 });
-    expect(deps.runFullAnalysis).not.toHaveBeenCalled();
+    expect(result).toEqual({ synced: 1, analyzed: 1, skippedAnalysis: 0, failed: 0 });
+    expect(deps.runFullAnalysis).toHaveBeenCalledTimes(1);
     expect(deps.saveState).toHaveBeenCalledWith(
       expect.objectContaining({
         '/tmp/repos/qts_account|master': expect.objectContaining({
-          analyzeConsecutiveFailures: 3,
-          lastAnalyzeError: 'parser crashed',
-          lastAnalyzeStatus: 'threshold_skipped',
+          analyzeConsecutiveFailures: 0,
+          lastAnalyzeError: undefined,
+          lastAnalyzeStatus: 'success',
         }),
       }),
     );
     expect(deps.writeCommitInfo).toHaveBeenCalledWith([
       expect.objectContaining({
-        status: 'threshold_skipped',
-        analyzeConsecutiveFailures: 3,
+        status: 'success',
+        analyzeConsecutiveFailures: 0,
         analyzeFailureThreshold: 3,
-        lastAnalyzeError: 'parser crashed',
+        lastAnalyzeError: undefined,
       }),
     ]);
-    expect(errorLogger).toHaveBeenCalledWith(
-      '[auto-sync] Skip analysis for /tmp/repos/qts_account; analyze consecutive failures 3/3 reached threshold. Fix the repository or clear auto-sync state before retrying.',
-    );
+    expect(errorLogger).not.toHaveBeenCalled();
   });
 
   it('clears prior analyze failure count after a successful analyze', async () => {
@@ -807,7 +922,9 @@ describe('auto-sync runner', () => {
         ['version: 1', 'name: back_end', 'repos:', '  hr/hiring/backend: qts_account'].join('\n'),
       );
 
-      await expect(addRepoToGroup({ groupName: 'back_end' }, 'qts_account')).resolves.toBe(false);
+      await expect(
+        addRepoToGroup({ groupName: 'back_end' }, 'hr/hiring/backend', 'qts_account'),
+      ).resolves.toBe(false);
 
       await expect(fs.readFile(path.join(groupDir, 'group.yaml'), 'utf-8')).resolves.toContain(
         'hr/hiring/backend: qts_account',
@@ -929,6 +1046,54 @@ describe('auto-sync starter', () => {
     }
   });
 
+  it('cancels the active run before removing watch ownership files', async () => {
+    const previousHome = process.env.GITNEXUS_HOME;
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-auto-sync-starter-'));
+    const cancelled = vi.fn();
+    const runOnce = vi.fn(
+      (_config, options) =>
+        new Promise<any>((resolve) => {
+          options?.signal?.addEventListener(
+            'abort',
+            () => {
+              cancelled();
+              resolve({ synced: 0, analyzed: 0, skippedAnalysis: 0, failed: 0 });
+            },
+            { once: true },
+          );
+        }),
+    );
+    try {
+      process.env.GITNEXUS_HOME = tempDir;
+      await fs.writeFile(
+        path.join(tempDir, 'watch_config.yml'),
+        [
+          'sync_interval_minutes: 5',
+          'projects:',
+          '  - local_path: /tmp/repos',
+          '    branch: master',
+          '    remote_urls:',
+          '      - git@github.com:team/repo.git',
+        ].join('\n'),
+      );
+      const handle = await startAutoSyncWatch({
+        runOnce,
+        keepAlive: false,
+        deps: { isProcessAlive: vi.fn(() => false) },
+      });
+      const paths = getAutoSyncWatchPaths(tempDir);
+      await handle!.stop();
+
+      expect(cancelled).toHaveBeenCalledTimes(1);
+      await expect(fs.access(paths.pidPath)).rejects.toThrow();
+      await expect(fs.access(paths.lockPath)).rejects.toThrow();
+    } finally {
+      if (previousHome === undefined) delete process.env.GITNEXUS_HOME;
+      else process.env.GITNEXUS_HOME = previousHome;
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a second running watch for the same GITNEXUS_HOME', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-auto-sync-watch-'));
     const paths = getAutoSyncWatchPaths(tempDir);
@@ -938,7 +1103,10 @@ describe('auto-sync starter', () => {
       const handle = await startAutoSyncWatch({
         paths,
         stderr,
-        deps: { isProcessAlive: vi.fn(() => true) },
+        deps: {
+          isProcessAlive: vi.fn(() => true),
+          readProcessCommand: vi.fn(() => verifiedWatchCommand),
+        },
       });
 
       expect(handle).toBeNull();
@@ -1019,7 +1187,10 @@ describe('auto-sync starter', () => {
         paths,
         stderr,
         runOnce: vi.fn(async () => ({ synced: 0, analyzed: 0, skippedAnalysis: 0, failed: 0 })),
-        deps: { isProcessAlive: vi.fn(() => true) },
+        deps: {
+          isProcessAlive: vi.fn(() => true),
+          readProcessCommand: vi.fn(() => verifiedWatchCommand),
+        },
       });
 
       expect(handle).toBeNull();
@@ -1114,7 +1285,10 @@ describe('auto-sync starter', () => {
       await writeWatchOwner(paths, 12345);
 
       await expect(
-        readAutoSyncWatchStatus(paths, { isProcessAlive: vi.fn(() => true) }),
+        readAutoSyncWatchStatus(paths, {
+          isProcessAlive: vi.fn(() => true),
+          readProcessCommand: vi.fn(() => verifiedWatchCommand),
+        }),
       ).resolves.toMatchObject({ state: 'running', pid: 12345 });
       await expect(
         stopAutoSyncWatch({
@@ -1123,6 +1297,7 @@ describe('auto-sync starter', () => {
           pollMs: 1,
           deps: {
             isProcessAlive: vi.fn(() => alive),
+            readProcessCommand: vi.fn(() => verifiedWatchCommand),
             killProcess: vi.fn((pid, signal) => {
               killProcess(pid, signal);
               alive = false;
@@ -1155,6 +1330,7 @@ describe('auto-sync starter', () => {
           pollMs: 1,
           deps: {
             isProcessAlive: vi.fn(() => true),
+            readProcessCommand: vi.fn(() => verifiedWatchCommand),
             killProcess: vi.fn(),
             sleep: vi.fn(async () => {}),
           },
@@ -1162,7 +1338,10 @@ describe('auto-sync starter', () => {
       ).resolves.toBe(false);
 
       await expect(
-        readAutoSyncWatchStatus(paths, { isProcessAlive: vi.fn(() => true) }),
+        readAutoSyncWatchStatus(paths, {
+          isProcessAlive: vi.fn(() => true),
+          readProcessCommand: vi.fn(() => verifiedWatchCommand),
+        }),
       ).resolves.toMatchObject({
         state: 'stopping',
         pid: 12345,
@@ -1211,6 +1390,42 @@ describe('auto-sync starter', () => {
     }
   });
 
+  it('refuses to signal a reused pid whose command is not GitNexus watch', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-auto-sync-watch-'));
+    const paths = getAutoSyncWatchPaths(tempDir);
+    const killProcess = vi.fn();
+    try {
+      await writeWatchOwner(paths, 12345);
+
+      await expect(
+        stopAutoSyncWatch({
+          paths,
+          stderr: { write: vi.fn() },
+          deps: {
+            isProcessAlive: vi.fn(() => true),
+            readProcessCommand: vi.fn(() => 'node unrelated-service.js'),
+            killProcess,
+            sleep: vi.fn(async () => {}),
+          },
+        }),
+      ).resolves.toBe(false);
+
+      expect(killProcess).not.toHaveBeenCalled();
+      await expect(
+        readAutoSyncWatchStatus(paths, {
+          isProcessAlive: vi.fn(() => true),
+          readProcessCommand: vi.fn(() => 'node unrelated-service.js'),
+        }),
+      ).resolves.toMatchObject({
+        state: 'error',
+        pid: 12345,
+        message: expect.stringContaining('not a GitNexus watch process'),
+      });
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('restart can start only after stop confirms pid and lock cleanup', async () => {
     const previousHome = process.env.GITNEXUS_HOME;
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-auto-sync-watch-'));
@@ -1242,6 +1457,7 @@ describe('auto-sync starter', () => {
           stderr: { write: vi.fn() },
           deps: {
             isProcessAlive: vi.fn(() => alive),
+            readProcessCommand: vi.fn(() => verifiedWatchCommand),
             killProcess: vi.fn(() => {
               alive = false;
             }),

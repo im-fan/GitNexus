@@ -22,6 +22,7 @@ import {
 } from './state.js';
 import type { AutoSyncConfig, AutoSyncProjectConfig } from './config.js';
 import { validateAutoSyncRemoteUrl } from './config.js';
+import { runAutoSyncAnalysis, type AutoSyncAnalysisRunner } from './analysis-worker-launch.js';
 
 export interface AutoSyncLogger {
   info(message: string): void;
@@ -33,7 +34,8 @@ export interface AutoSyncRunDeps {
   cloneOrPull: typeof cloneOrPull;
   getCurrentBranch: typeof getCurrentBranch;
   getCurrentCommit: typeof getCurrentCommit;
-  runFullAnalysis: typeof runFullAnalysis;
+  runFullAnalysis?: typeof runFullAnalysis;
+  runAnalysis: AutoSyncAnalysisRunner;
   registerRepo: typeof registerRepo;
   loadState: typeof loadAutoSyncState;
   saveState: typeof saveAutoSyncState;
@@ -61,7 +63,7 @@ const DEFAULT_DEPS: AutoSyncRunDeps = {
   cloneOrPull,
   getCurrentBranch,
   getCurrentCommit,
-  runFullAnalysis,
+  runAnalysis: runAutoSyncAnalysis,
   registerRepo,
   loadState: loadAutoSyncState,
   saveState: saveAutoSyncState,
@@ -74,12 +76,19 @@ const DEFAULT_DEPS: AutoSyncRunDeps = {
 
 export async function runAutoSyncOnce(
   config: AutoSyncConfig,
-  options: { deps?: Partial<AutoSyncRunDeps>; logger?: AutoSyncLogger; now?: () => Date } = {},
+  options: {
+    deps?: Partial<AutoSyncRunDeps>;
+    logger?: AutoSyncLogger;
+    now?: () => Date;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<AutoSyncRunResult> {
   const deps = { ...DEFAULT_DEPS, ...options.deps };
   const logger = options.logger ?? DEFAULT_LOGGER;
   const now = options.now ?? (() => new Date());
+  throwIfAborted(options.signal);
   const state = await deps.loadState();
+  throwIfAborted(options.signal);
   const groupsToSync = new Set<string>();
   const result: AutoSyncRunResult = { synced: 0, analyzed: 0, skippedAnalysis: 0, failed: 0 };
   const commitInfoEntries: ProjectCommitInfoEntry[] = [];
@@ -92,112 +101,135 @@ export async function runAutoSyncOnce(
   );
 
   const workItems = await buildWorkItems(config, deps);
-  const repoResults = await mapWithConcurrency(workItems, actualConcurrency, async (item) => {
-    const lastSyncTime = now().toISOString();
-    try {
-      validateAutoSyncRemoteUrl(item.remoteUrl);
-      const repoName = extractRepoNameFromRemoteUrl(item.remoteUrl);
-      const targetDir = getConfiguredRepoPath({ localPath: item.cloneRoot.root }, repoName);
-      const syncResult = await syncFirstAvailableBranch({
-        item,
-        repoName,
-        targetDir,
-        timeoutMs: config.repoGitTimeoutMs,
-        deps,
-        logger,
-      });
-      if (syncResult.ok === false) {
+  const repoResults = await mapWithConcurrency(
+    workItems,
+    actualConcurrency,
+    options.signal,
+    async (item) => {
+      const lastSyncTime = now().toISOString();
+      try {
+        throwIfAborted(options.signal);
+        validateAutoSyncRemoteUrl(item.remoteUrl);
+        const repoName = extractRepoNameFromRemoteUrl(item.remoteUrl);
+        const targetDir = getConfiguredRepoPath({ localPath: item.cloneRoot.root }, repoName);
+        const syncResult = await syncFirstAvailableBranch({
+          item,
+          repoName,
+          targetDir,
+          timeoutMs: config.repoGitTimeoutMs,
+          deps,
+          logger,
+        });
+        throwIfAborted(options.signal);
+        if (syncResult.ok === false) {
+          logger.error(
+            `[auto-sync] Repository sync failed for ${item.remoteUrl}; no configured branch could be pulled: ${syncResult.message}`,
+          );
+          return {
+            kind: 'failed' as const,
+            project: item.project,
+            remoteUrl: item.remoteUrl,
+            targetDir,
+            branch: item.project.branches[0],
+            status: syncResult.status,
+            analyzeConsecutiveFailures: 0,
+            lastSyncTime,
+          };
+        }
+
+        const currentBranch = syncResult.branch;
+
+        const currentCommit = deps.getCurrentCommit(targetDir);
+        const stateKey = buildStateKey(targetDir, currentBranch);
+        const previous = state[stateKey];
+        let analyzeStatus: AutoSyncAnalyzeStatus = 'skipped';
+        let analyzedCommitId = previous?.analyzedCommitId;
+        let analyzeConsecutiveFailures = previous?.analyzeConsecutiveFailures ?? 0;
+        let lastAnalyzeError = previous?.lastAnalyzeError;
+        let stats: RepoMeta['stats'] | undefined;
+
+        if (previous && previous.codeCommitId !== currentCommit) {
+          analyzeConsecutiveFailures = 0;
+          lastAnalyzeError = undefined;
+        }
+
+        if (analyzeConsecutiveFailures >= config.analyzeFailureThreshold) {
+          analyzeStatus = 'threshold_skipped';
+          logger.error(
+            `[auto-sync] Skip analysis for ${targetDir}; analyze consecutive failures ${analyzeConsecutiveFailures}/${config.analyzeFailureThreshold} reached threshold. Fix the repository or clear auto-sync state before retrying.`,
+          );
+        } else if (
+          shouldAnalyzeCommit({
+            currentCommit,
+            previousAnalyzedCommit: previous?.analyzedCommitId,
+            previousStatus: previous?.lastAnalyzeStatus,
+          })
+        ) {
+          try {
+            const analysis = deps.runFullAnalysis
+              ? await deps.runFullAnalysis(
+                  targetDir,
+                  { branch: currentBranch, skipAgentsMd: true, skipSkills: true },
+                  { onProgress: () => {} },
+                )
+              : await deps.runAnalysis(
+                  targetDir,
+                  { branch: currentBranch, skipAgentsMd: true, skipSkills: true },
+                  config.analyzeTimeoutMs,
+                  options.signal,
+                );
+            throwIfAborted(options.signal);
+            stats = analysis.stats;
+            analyzeStatus = 'success';
+            analyzedCommitId = currentCommit;
+            analyzeConsecutiveFailures = 0;
+            lastAnalyzeError = undefined;
+          } catch (err: unknown) {
+            if (options.signal?.aborted) throw err;
+            analyzeStatus = 'failed';
+            analyzeConsecutiveFailures += 1;
+            lastAnalyzeError = shortErrorMessage(err);
+            logger.error(
+              `[auto-sync] Analysis failed for ${targetDir}; consecutive failures ${analyzeConsecutiveFailures}/${config.analyzeFailureThreshold}: ${lastAnalyzeError}`,
+            );
+          }
+        } else {
+          logger.info(`[auto-sync] Skip analysis for ${targetDir}; commit unchanged.`);
+        }
+        throwIfAborted(options.signal);
+
+        return {
+          kind: 'synced' as const,
+          project: item.project,
+          repoName,
+          remoteUrl: item.remoteUrl,
+          targetDir,
+          branch: currentBranch,
+          currentCommit,
+          analyzedCommitId,
+          analyzeStatus,
+          analyzeConsecutiveFailures,
+          lastAnalyzeError,
+          stats,
+          stateKey,
+          lastSyncTime,
+        };
+      } catch (err: unknown) {
+        if (options.signal?.aborted) throw err;
         logger.error(
-          `[auto-sync] Repository sync failed for ${item.remoteUrl}; no configured branch could be pulled: ${syncResult.message}`,
+          `[auto-sync] Repository sync failed for ${item.remoteUrl}: ${(err as Error).message}`,
         );
         return {
           kind: 'failed' as const,
           project: item.project,
           remoteUrl: item.remoteUrl,
-          targetDir,
-          branch: item.project.branches[0],
-          status: syncResult.status,
-          analyzeConsecutiveFailures: 0,
+          targetDir: '',
+          status: 'sync_failed' as const,
           lastSyncTime,
         };
       }
-
-      const currentBranch = syncResult.branch;
-
-      const currentCommit = deps.getCurrentCommit(targetDir);
-      const stateKey = buildStateKey(targetDir, currentBranch);
-      const previous = state[stateKey];
-      let analyzeStatus: AutoSyncAnalyzeStatus = 'skipped';
-      let analyzedCommitId = previous?.analyzedCommitId;
-      let analyzeConsecutiveFailures = previous?.analyzeConsecutiveFailures ?? 0;
-      let lastAnalyzeError = previous?.lastAnalyzeError;
-      let stats: RepoMeta['stats'] | undefined;
-
-      if (analyzeConsecutiveFailures >= config.analyzeFailureThreshold) {
-        analyzeStatus = 'threshold_skipped';
-        logger.error(
-          `[auto-sync] Skip analysis for ${targetDir}; analyze consecutive failures ${analyzeConsecutiveFailures}/${config.analyzeFailureThreshold} reached threshold. Fix the repository or clear auto-sync state before retrying.`,
-        );
-      } else if (
-        shouldAnalyzeCommit({
-          currentCommit,
-          previousAnalyzedCommit: previous?.analyzedCommitId,
-          previousStatus: previous?.lastAnalyzeStatus,
-        })
-      ) {
-        try {
-          const analysis = await deps.runFullAnalysis(
-            targetDir,
-            { branch: currentBranch, skipAgentsMd: true, skipSkills: true },
-            { onProgress: () => {} },
-          );
-          stats = analysis.stats;
-          analyzeStatus = 'success';
-          analyzedCommitId = currentCommit;
-          analyzeConsecutiveFailures = 0;
-          lastAnalyzeError = undefined;
-        } catch (err: unknown) {
-          analyzeStatus = 'failed';
-          analyzeConsecutiveFailures += 1;
-          lastAnalyzeError = shortErrorMessage(err);
-          logger.error(
-            `[auto-sync] Analysis failed for ${targetDir}; consecutive failures ${analyzeConsecutiveFailures}/${config.analyzeFailureThreshold}: ${lastAnalyzeError}`,
-          );
-        }
-      } else {
-        logger.info(`[auto-sync] Skip analysis for ${targetDir}; commit unchanged.`);
-      }
-
-      return {
-        kind: 'synced' as const,
-        project: item.project,
-        repoName,
-        remoteUrl: item.remoteUrl,
-        targetDir,
-        branch: currentBranch,
-        currentCommit,
-        analyzedCommitId,
-        analyzeStatus,
-        analyzeConsecutiveFailures,
-        lastAnalyzeError,
-        stats,
-        stateKey,
-        lastSyncTime,
-      };
-    } catch (err: unknown) {
-      logger.error(
-        `[auto-sync] Repository sync failed for ${item.remoteUrl}: ${(err as Error).message}`,
-      );
-      return {
-        kind: 'failed' as const,
-        project: item.project,
-        remoteUrl: item.remoteUrl,
-        targetDir: '',
-        status: 'sync_failed' as const,
-        lastSyncTime,
-      };
-    }
-  });
+    },
+  );
 
   for (const repoResult of repoResults) {
     if (repoResult.kind === 'failed') {
@@ -231,8 +263,7 @@ export async function runAutoSyncOnce(
         branch: repoResult.branch,
       };
       await deps.registerRepo(repoResult.targetDir, meta, {
-        name: repoResult.repoName,
-        allowDuplicateName: true,
+        name: getAutoSyncRepoIdentity(repoResult.remoteUrl),
       });
       result.analyzed += 1;
     } else if (repoResult.analyzeStatus === 'failed') {
@@ -259,7 +290,11 @@ export async function runAutoSyncOnce(
     if (repoResult.project.groupName) {
       let groupMembershipOk = false;
       try {
-        await deps.addRepoToGroup(repoResult.project, repoResult.repoName);
+        await deps.addRepoToGroup(
+          repoResult.project,
+          getAutoSyncRepoIdentity(repoResult.remoteUrl),
+          getAutoSyncRepoIdentity(repoResult.remoteUrl),
+        );
         groupMembershipOk = true;
       } catch (err: unknown) {
         result.failed += 1;
@@ -300,15 +335,25 @@ export function getConfiguredRepoPath(
 
 export async function addRepoToGroup(
   project: Pick<AutoSyncProjectConfig, 'groupName'>,
-  repoName: string,
+  groupPath: string,
+  registryName = groupPath,
 ): Promise<boolean> {
   if (!project.groupName) return false;
   const groupDir = getGroupDir(getDefaultGitnexusDir(), project.groupName);
   const config = await loadGroupConfig(groupDir);
-  if (Object.values(config.repos).includes(repoName)) return false;
-  config.repos[repoName] = repoName;
+  if (config.repos[groupPath] === registryName) return false;
+  if (config.repos[groupPath] !== undefined) {
+    throw new Error(`group path ${groupPath} is already mapped to ${config.repos[groupPath]}`);
+  }
+  config.repos[groupPath] = registryName;
   await writeGroupConfigAtomic(path.join(groupDir, 'group.yaml'), config);
   return true;
+}
+
+export function getAutoSyncRepoIdentity(remoteUrl: string): string {
+  validateAutoSyncRemoteUrl(remoteUrl);
+  const [, host, remotePath] = /^git@([^:\s/]+):([^\s]+)$/.exec(remoteUrl.trim())!;
+  return `${host.toLowerCase()}/${remotePath.replace(/\.git$/, '')}`;
 }
 
 export async function syncGroupByName(groupName: string): Promise<void> {
@@ -359,19 +404,26 @@ async function buildWorkItems(
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
+  signal: AbortSignal | undefined,
   worker: (item: T) => Promise<R>,
 ): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let nextIndex = 0;
   const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
     while (nextIndex < items.length) {
+      throwIfAborted(signal);
       const currentIndex = nextIndex;
       nextIndex += 1;
       results[currentIndex] = await worker(items[currentIndex]);
+      throwIfAborted(signal);
     }
   });
   await Promise.all(runners);
   return results;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error('Auto-sync run cancelled.');
 }
 
 interface AutoSyncWorkItem {
@@ -402,6 +454,7 @@ async function syncFirstAvailableBranch(input: {
         allowAutoSyncSsh: true,
         timeoutMs: input.timeoutMs,
         branch,
+        overwriteLocalChanges: input.item.project.overwriteLocalChanges,
       });
       const currentBranch = input.deps.getCurrentBranch(input.targetDir);
       if (currentBranch === branch) return { ok: true, branch };

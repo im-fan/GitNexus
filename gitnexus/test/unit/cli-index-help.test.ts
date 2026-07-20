@@ -268,6 +268,8 @@ describe('CLI help surface', () => {
       const config = fs.readFileSync(configPath, 'utf8');
       expect(config).toContain('sync_interval_minutes: 10');
       expect(config).toContain('analyze_failure_threshold: 3');
+      expect(config).toContain('analyze_timeout: 5m');
+      expect(config).toContain('overwrite_local_changes: false');
       expect(config).toContain(`local_path: ${path.join(home, 'repo')}`);
       expect(config).not.toContain('/abs/path/to/repos');
       expect(config).toContain('git@github.com:owner/repo.git');

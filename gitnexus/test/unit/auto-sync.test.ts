@@ -56,13 +56,15 @@ describe('auto-sync', () => {
     await fs.writeFile(
       path.join(gitnexusHome, 'watch_config.yml'),
       [
-        'sync_interval_minutes: 10',
+        'sync_interval_minutes: 120',
         'max_concurrency: 3',
         'repo_git_timeout: 12s',
+        'analyze_timeout: 45m',
         'analyze_failure_threshold: 2',
         'projects:',
         '  - local_path: /tmp/repos',
         '    group_name: back_end',
+        '    overwrite_local_changes: true',
         '    branches: [test, master, test]',
         '    remote_urls:',
         '      - git@gitee.com:qts_server/qts_account.git',
@@ -74,13 +76,15 @@ describe('auto-sync', () => {
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) throw new Error('expected config to load');
     expect(loaded.config.configPath).toBe(path.join(gitnexusHome, 'watch_config.yml'));
-    expect(loaded.config.syncIntervalMinutes).toBe(10);
+    expect(loaded.config.syncIntervalMinutes).toBe(120);
     expect(loaded.config.maxConcurrency).toBe(3);
     expect(loaded.config.repoGitTimeoutMs).toBe(12_000);
+    expect(loaded.config.analyzeTimeoutMs).toBe(2_700_000);
     expect(loaded.config.analyzeFailureThreshold).toBe(2);
     expect(loaded.config.projects[0]).toMatchObject({
       localPath: '/tmp/repos',
       groupName: 'back_end',
+      overwriteLocalChanges: true,
       branches: ['test', 'master'],
       remoteUrls: ['git@gitee.com:qts_server/qts_account.git'],
     });
@@ -105,9 +109,34 @@ describe('auto-sync', () => {
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) throw new Error('expected config');
     expect(loaded.config.repoGitTimeoutMs).toBe(10_000);
+    expect(loaded.config.analyzeTimeoutMs).toBe(300_000);
     expect(loaded.config.maxConcurrency).toBe(1);
     expect(loaded.config.analyzeFailureThreshold).toBe(3);
     expect(loaded.config.projects[0].groupName).toBeUndefined();
+    expect(loaded.config.projects[0].overwriteLocalChanges).toBe(false);
+  });
+
+  it('rejects analyze_timeout values above half the sync interval', async () => {
+    await fs.writeFile(
+      path.join(gitnexusHome, 'watch_config.yml'),
+      [
+        'sync_interval_minutes: 10',
+        'analyze_timeout: 6m',
+        'projects:',
+        '  - local_path: /tmp/repos',
+        '    branch: master',
+        '    remote_urls:',
+        '      - git@github.com:owner/repo.git',
+      ].join('\n'),
+    );
+
+    const loaded = await loadAutoSyncConfig();
+
+    expect(loaded.ok).toBe(false);
+    if (loaded.ok) throw new Error('expected invalid config');
+    expect(loaded.message).toContain(
+      'analyze_timeout must not exceed half of sync_interval_minutes (5m)',
+    );
   });
 
   it('rejects invalid analyze_failure_threshold values', async () => {
@@ -373,6 +402,37 @@ describe('auto-sync', () => {
     expect(stderr).toHaveBeenCalledWith(
       `[auto-sync] Ignoring unreadable or corrupt state file: ${statePath}. State will be rebuilt.\n`,
     );
+  });
+
+  it('drops malformed state entries while preserving valid entries', async () => {
+    const statePath = path.join(tempDir, 'auto-sync-state.json');
+    await fs.writeFile(
+      statePath,
+      JSON.stringify({
+        '/tmp/repos/valid|main': {
+          codeCommitId: 'abc',
+          analyzedCommitId: 'abc',
+          lastAnalyzeStatus: 'success',
+          analyzeConsecutiveFailures: 0,
+          lastSyncTime: '2026-06-30T00:00:00.000Z',
+        },
+        '/tmp/repos/invalid|main': {
+          codeCommitId: 123,
+          analyzeConsecutiveFailures: -1,
+          lastSyncTime: null,
+        },
+      }),
+    );
+
+    await expect(loadAutoSyncState(statePath)).resolves.toEqual({
+      '/tmp/repos/valid|main': {
+        codeCommitId: 'abc',
+        analyzedCommitId: 'abc',
+        lastAnalyzeStatus: 'success',
+        analyzeConsecutiveFailures: 0,
+        lastSyncTime: '2026-06-30T00:00:00.000Z',
+      },
+    });
   });
 
   it('writes project_commit_info.txt atomically', async () => {

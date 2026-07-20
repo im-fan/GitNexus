@@ -272,6 +272,7 @@ export interface CloneOrPullOptions {
   allowAutoSyncSsh?: boolean;
   timeoutMs?: number;
   branch?: string;
+  overwriteLocalChanges?: boolean;
   runGitForTest?: typeof runGit;
 }
 
@@ -551,22 +552,55 @@ export async function cloneOrPull(
     onProgress?.({ phase: 'pulling', message: 'Pulling latest changes...' });
     const runGitImpl = options?.runGitForTest ?? runGit;
     if (options?.branch) {
-      await runGitImpl(['fetch', '--depth', '1', 'origin', options.branch], safeTarget, {
-        token: options?.token,
-        url,
-        timeoutMs: options?.timeoutMs,
-      });
-      await runGitImpl(['checkout', options.branch], safeTarget, {
+      if (!options.overwriteLocalChanges) {
+        const status = await runGitImpl(['status', '--porcelain'], safeTarget, {
+          token: options?.token,
+          url,
+          timeoutMs: options?.timeoutMs,
+        });
+        if (status.trim()) {
+          throw new Error(
+            `Refusing to update ${safeTarget}: local changes detected. Set overwrite_local_changes: true to overwrite them.`,
+          );
+        }
+      }
+      await runGitImpl(
+        [
+          'fetch',
+          '--depth',
+          '1',
+          'origin',
+          `refs/heads/${options.branch}:refs/remotes/origin/${options.branch}`,
+        ],
+        safeTarget,
+        {
+          token: options?.token,
+          url,
+          timeoutMs: options?.timeoutMs,
+        },
+      );
+      await runGitImpl(
+        [
+          'checkout',
+          ...(options.overwriteLocalChanges ? ['--force'] : []),
+          '-B',
+          options.branch,
+          `origin/${options.branch}`,
+        ],
+        safeTarget,
+        {
+          token: options?.token,
+          url,
+          timeoutMs: options?.timeoutMs,
+        },
+      );
+    } else {
+      await runGitImpl(['pull', '--ff-only'], safeTarget, {
         token: options?.token,
         url,
         timeoutMs: options?.timeoutMs,
       });
     }
-    await runGitImpl(['pull', '--ff-only'], safeTarget, {
-      token: options?.token,
-      url,
-      timeoutMs: options?.timeoutMs,
-    });
   } else {
     if (targetExists) {
       throw new Error(`Clone target already exists but is not a git repository: ${safeTarget}`);
@@ -790,7 +824,7 @@ export function buildGitEnv(
 // host-scoped Authorization header (GitHub PAT for github.com, else the
 // server's AZURE_DEVOPS_PAT for Azure hosts) via the GIT_CONFIG_* protocol —
 // never in argv. See resolveGitCredential / buildExtraHeaderKey.
-function runGit(args: string[], cwd?: string, options?: RunGitOptions): Promise<void> {
+function runGit(args: string[], cwd?: string, options?: RunGitOptions): Promise<string> {
   return new Promise((resolve, reject) => {
     const spawnGit = options?.spawnForTest ?? spawn;
     const proc = spawnGit('git', args, {
@@ -800,6 +834,7 @@ function runGit(args: string[], cwd?: string, options?: RunGitOptions): Promise<
       env: buildGitEnv(process.env, options),
     });
 
+    let stdout = '';
     let stderr = '';
     let settled = false;
     let timedOut = false;
@@ -821,6 +856,9 @@ function runGit(args: string[], cwd?: string, options?: RunGitOptions): Promise<
             }, options.timeoutKillGraceMs ?? 1_000);
           }, options.timeoutMs)
         : undefined;
+    proc.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk;
+    });
     proc.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk;
     });
@@ -830,7 +868,7 @@ function runGit(args: string[], cwd?: string, options?: RunGitOptions): Promise<
         finish(() => reject(new Error(`git ${args[0]} timed out after ${options?.timeoutMs}ms`)));
         return;
       }
-      if (code === 0) finish(resolve);
+      if (code === 0) finish(() => resolve(stdout));
       else {
         // Log full stderr internally but don't expose it to API callers (SSRF mitigation)
         if (stderr.trim()) logger.error(`git ${args[0]} stderr: ${stderr.trim()}`);

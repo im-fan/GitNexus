@@ -440,9 +440,11 @@ gitnexus watch stop
 
 ```yaml
 sync_interval_minutes: 10
+analyze_timeout: 5m
 projects:
   - local_path: /absolute/path/to/clones
     branches: [main, master]
+    overwrite_local_changes: false
     remote_urls:
       - git@github.com:owner/repo.git
 ```
@@ -450,6 +452,7 @@ projects:
 - `sync_interval_minutes` must be at least `5`; `local_path` must be an absolute path.
 - Remote URLs must use SSH SCP form and are limited to GitHub, GitLab, or Gitee.
 - `branches` are tried in order. The legacy `branch` field is supported, but do not set both.
+- Analysis runs in an isolated worker; `analyze_timeout` defaults to, and cannot exceed, half of `sync_interval_minutes`. `overwrite_local_changes` defaults to `false`, so a dirty local clone is skipped rather than overwritten. Stopping watch cancels an active analysis immediately.
 - Add `group_name` only after creating that group with `gitnexus group create <name>`.
 
 See the [full watch configuration and runtime reference](gitnexus/README.md#gitnexus-watch) for concurrency, timeouts, failure thresholds, and runtime files.

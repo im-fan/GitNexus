@@ -47,9 +47,12 @@ export async function loadAutoSyncState(
   try {
     const raw = await fs.readFile(statePath, 'utf-8');
     const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as AutoSyncCommitState)
-      : {};
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, AutoSyncCommitStateEntry] =>
+        isAutoSyncCommitStateEntry(entry[1]),
+      ),
+    );
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
       process.stderr.write(
@@ -58,6 +61,26 @@ export async function loadAutoSyncState(
     }
     return {};
   }
+}
+
+function isAutoSyncCommitStateEntry(value: unknown): value is AutoSyncCommitStateEntry {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const entry = value as Record<string, unknown>;
+  return (
+    typeof entry.codeCommitId === 'string' &&
+    typeof entry.lastSyncTime === 'string' &&
+    (entry.analyzedCommitId === undefined || typeof entry.analyzedCommitId === 'string') &&
+    (entry.lastAnalyzeStatus === undefined ||
+      entry.lastAnalyzeStatus === 'success' ||
+      entry.lastAnalyzeStatus === 'failed' ||
+      entry.lastAnalyzeStatus === 'skipped' ||
+      entry.lastAnalyzeStatus === 'threshold_skipped') &&
+    (entry.analyzeConsecutiveFailures === undefined ||
+      (typeof entry.analyzeConsecutiveFailures === 'number' &&
+        Number.isInteger(entry.analyzeConsecutiveFailures) &&
+        entry.analyzeConsecutiveFailures >= 0)) &&
+    (entry.lastAnalyzeError === undefined || typeof entry.lastAnalyzeError === 'string')
+  );
 }
 
 export async function saveAutoSyncState(
